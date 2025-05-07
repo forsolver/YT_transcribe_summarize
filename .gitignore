@@ -18,3 +18,5 @@ ENV/
 *.log
 .env
 .env.local 
+.git-connect
+.git-connect.pub 
