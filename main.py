@@ -157,8 +157,8 @@ class YouTubeSummarizer(QMainWindow):
                 {'role': 'system', 'content': 'Ты — продвинутый ассистент для саммаризации текстов.'},
                 {'role': 'user', 'content': prompt}
             ],
-            'max_tokens': 1024,
-            'temperature': 0.7
+            'max_tokens': 4096,
+            'temperature': 1.0
         }
 
         response = requests.post('https://api.openai.com/v1/chat/completions', headers=headers, json=data)
