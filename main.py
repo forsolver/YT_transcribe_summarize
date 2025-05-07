@@ -211,8 +211,8 @@ class YouTubeSummarizer(QMainWindow):
                 {'role': 'system', 'content': 'Ты — эксперт по анализу транскриптов видео.'},
                 {'role': 'user', 'content': prompt}
             ],
-            'max_tokens': 1024,
-            'temperature': 0.7
+            'max_tokens': 4096,
+            'temperature': 1.0
         }
         self.answer_text.clear()
         self.answer_text.setPlainText('Жду ответ от GPT-4o...')
