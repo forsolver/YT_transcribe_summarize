@@ -152,7 +152,7 @@ class YouTubeSummarizer(QMainWindow):
         prompt = prompt_template.replace('{{CONVERSATION_TEXT}}', transcript)
 
         data = {
-            'model': 'gpt-4o',
+            'model': 'gpt-4-1106-preview',
             'messages': [
                 {'role': 'system', 'content': 'Ты — продвинутый ассистент для саммаризации текстов.'},
                 {'role': 'user', 'content': prompt}
@@ -206,7 +206,7 @@ class YouTubeSummarizer(QMainWindow):
             'Если в ответе ты ссылаешься на конкретную цитату или фрагмент, обязательно указывай таймкод в формате [чч:мм:сс] перед цитатой или после неё. Отвечай максимально подробно и по-русски.'
         )
         data = {
-            'model': 'gpt-4o',
+            'model': 'gpt-4-1106-preview',
             'messages': [
                 {'role': 'system', 'content': 'Ты — эксперт по анализу транскриптов видео.'},
                 {'role': 'user', 'content': prompt}
