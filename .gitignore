@@ -20,3 +20,4 @@ ENV/
 .env.local 
 .git-connect
 .git-connect.pub 
+cookies.txt
