@@ -6,8 +6,25 @@ from yt_dlp import YoutubeDL
 
 __all__ = [
     "get_transcript",
-    "extract_video_id"
+    "extract_video_id",
+    "get_video_info"
 ]
+
+def get_video_info(video_id: str):
+    """Возвращает информацию о видео, включая длительность."""
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    ydl_opts = {
+        "skip_download": True,
+        "quiet": True,
+        "nocheckcertificate": True,
+    }
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {"duration": info.get("duration"), "title": info.get("title")}
+    except Exception as e:
+        # print(f"Error getting video info: {e}")
+        return {"duration": None, "title": None}
 
 def extract_video_id(url_or_id: str) -> str:
     """Возвращает идентификатор YouTube-ролика (11 символов)."""
@@ -73,9 +90,33 @@ def get_transcript(video_id: str, lang_priority=("ru", "en")):
         raise RuntimeError("Не удалось получить транскрипт")
 
     # сохранить фрагменты с таймкодами для последующего Q&A
-    fragments = [{"start": entry["start"], "text": entry["text"]} for entry in transcript]
-    plain = " ".join(entry["text"] for entry in transcript)
-    return plain, fragments
+    # Сначала получим информацию о видео, включая его длительность
+    video_info = get_video_info(video_id)
+    video_duration = video_info.get("duration")
+
+    processed_fragments = []
+    for i, entry in enumerate(transcript):
+        start_time = entry["start"]
+        # Длительность текущего фрагмента = время начала следующего - время начала текущего
+        # Для последнего фрагмента: общая длительность видео - время начала последнего фрагмента
+        if i < len(transcript) - 1:
+            duration = transcript[i+1]["start"] - start_time
+        elif video_duration is not None:
+            duration = video_duration - start_time
+        else:
+            # Если общая длительность видео неизвестна, используем эвристику (например, 5 секунд)
+            # или оставляем None, чтобы обработать это позже.
+            # Для простоты пока оставим эвристическую длительность из оригинального API (поле duration в entry)
+            duration = entry.get("duration", 5.0) # youtube_transcript_api добавляет поле duration
+
+        processed_fragments.append({
+            "start": start_time,
+            "text": entry["text"],
+            "duration": duration
+        })
+
+    plain_text = " ".join(entry["text"] for entry in processed_fragments)
+    return plain_text, processed_fragments, video_info
 
 
 # ---------- yt-dlp fallback ----------
