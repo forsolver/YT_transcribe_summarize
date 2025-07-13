@@ -1,4 +1,7 @@
 import re
+import os
+import subprocess
+from yt_dlp import YoutubeDL
 
 DEFAULT_MIN_SILENCE_DURATION = 2.0  # Минимальная длительность "тихого" сегмента в секундах, чтобы считать его трюком
 DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT = 3 # Максимальное количество слов в сегменте, чтобы он считался "тихим"
@@ -6,7 +9,7 @@ MUSIC_TAG_PATTERN = re.compile(r"\[музыка\]", re.IGNORECASE)
 
 def extract_trick_segments(
     fragments: list[dict],
-    min_silence_duration: float = DEFAULT_MIN_SILENCE_DURATION,
+    min_silence_duration: float = 10.0,  # Увеличиваем минимальную длительность до 10 секунд
     max_words_in_segment: int = DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT
 ) -> list[dict]:
     """
@@ -105,3 +108,120 @@ def extract_trick_segments(
         })
 
     return trick_segments
+
+def extract_video_segments(video_id: str, segments: list[dict], output_dir: str = "tricks") -> list[str]:
+    """
+    Извлекает видео сегменты из YouTube видео в максимальном качестве.
+    
+    Args:
+        video_id: ID YouTube видео
+        segments: Список сегментов с полями 'start', 'end', 'duration'
+        output_dir: Директория для сохранения сегментов
+        
+    Returns:
+        Список путей к созданным видео файлам
+    """
+    if not segments:
+        return []
+    
+    # Фильтруем сегменты - оставляем только те, что длиннее 10 секунд
+    valid_segments = [seg for seg in segments if seg['duration'] >= 10.0]
+    
+    if not valid_segments:
+        print("Нет сегментов длиннее 10 секунд")
+        return []
+    
+    # Создаем директорию для сохранения
+    os.makedirs(output_dir, exist_ok=True)
+    
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    # Скачиваем видео в максимальном доступном качестве (отдельно видео+аудио, затем мерж)
+    download_opts = {
+        'format': 'bestvideo+bestaudio/best',  # лучшее видео + лучшее аудио, если не поддерживается — best
+        'outtmpl': os.path.join(output_dir, f'{video_id}.%(ext)s'),
+        'quiet': True,
+        'no_warnings': True,
+        'merge_output_format': 'mp4',  # объединяем в mp4
+    }
+
+    try:
+        with YoutubeDL(download_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            video_file = ydl.prepare_filename(info)
+
+        # Ищем фактически скачанный файл (может быть с другим расширением)
+        video_file_base = os.path.splitext(video_file)[0]
+        possible_extensions = ['.mp4', '.webm', '.mkv', '.avi', '.mov']
+        actual_video_file = None
+        
+        for ext in possible_extensions:
+            test_file = video_file_base + ext
+            if os.path.exists(test_file):
+                actual_video_file = test_file
+                break
+                
+        if not actual_video_file:
+            # Ищем любой файл с нужным video_id в папке
+            for file in os.listdir(output_dir):
+                if file.startswith(video_id):
+                    actual_video_file = os.path.join(output_dir, file)
+                    break
+                    
+        if not actual_video_file or not os.path.exists(actual_video_file):
+            raise RuntimeError(f"Не удалось найти скачанный файл для {video_id}")
+            
+        video_file = actual_video_file
+        print(f"Скачан файл: {os.path.basename(video_file)}")
+            
+        # Извлекаем сегменты с помощью ffmpeg
+        segment_files = []
+        for i, segment in enumerate(valid_segments):
+            start_time = segment['start']
+            duration = segment['duration']
+            
+            # Форматируем время для ffmpeg
+            start_str = _seconds_to_ffmpeg_time(start_time)
+            duration_str = _seconds_to_ffmpeg_time(duration)
+            
+            # Имя файла сегмента
+            segment_filename = f"{video_id}_trick_{i+1}_{start_str.replace(':', '-')}_({duration:.1f}s).mp4"
+            segment_path = os.path.join(output_dir, segment_filename)
+            
+            # Команда ffmpeg для извлечения сегмента (копируем без перекодирования для сохранения качества)
+            cmd = [
+                'ffmpeg',
+                '-i', video_file,
+                '-ss', start_str,
+                '-t', duration_str,
+                '-c', 'copy',  # Копируем без перекодирования для сохранения исходного качества
+                '-avoid_negative_ts', 'make_zero',
+                segment_path,
+                '-y'  # Перезаписываем файл если существует
+            ]
+            
+            try:
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+                segment_files.append(segment_path)
+                print(f"Создан сегмент {i+1}: {segment_filename}")
+            except subprocess.CalledProcessError as e:
+                print(f"Ошибка при извлечении сегмента {i+1}: {e.stderr}")
+                continue
+        
+        # Удаляем исходное видео после извлечения сегментов
+        try:
+            os.remove(video_file)
+        except OSError:
+            pass
+            
+        return segment_files
+
+    except Exception as e:
+        raise RuntimeError(f"Ошибка при извлечении видео сегментов: {e}")
+
+def _seconds_to_ffmpeg_time(seconds: float) -> str:
+    """Конвертирует секунды в формат времени ffmpeg (HH:MM:SS)"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"

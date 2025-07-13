@@ -40,6 +40,10 @@ class YouTubeSummarizerUI(QMainWindow): # Переименуем позже, е�
         self.extract_tricks_button.clicked.connect(self.run_extract_tricks)
         buttons_layout.addWidget(self.extract_tricks_button)
 
+        self.download_tricks_button = QPushButton("Скачать видео трюков")
+        self.download_tricks_button.clicked.connect(self.run_download_tricks)
+        buttons_layout.addWidget(self.download_tricks_button)
+
         layout.addLayout(buttons_layout)
 
         self.output_text_area = QTextEdit(readOnly=True) # Общее текстовое поле для вывода
@@ -137,6 +141,54 @@ class YouTubeSummarizerUI(QMainWindow): # Переименуем позже, е�
         except Exception as e:
             QMessageBox.critical(self, "Ошибка при извлечении трюков", str(e))
             logging.error(f"Ошибка при извлечении трюков: {e}", exc_info=True)
+
+    def run_download_tricks(self):
+        url = self.url_input.text().strip()
+        if not self._fetch_transcript_data(url):
+            return
+
+        if not self.processed_transcript_fragments:
+            QMessageBox.critical(self, "Ошибка", "Нет данных транскрипта для извлечения трюков.")
+            return
+
+        try:
+            # Извлекаем сегменты трюков
+            trick_segments = vp.extract_trick_segments(self.processed_transcript_fragments)
+
+            if not trick_segments:
+                self.output_text_area.setPlainText(f"Трюки не найдены в видео \"{self.video_info.get('title', 'Без названия')}\".")
+                return
+
+            # Получаем video_id
+            video_id = tr.extract_video_id(url)
+            
+            # Показываем сообщение о начале загрузки
+            self.output_text_area.setPlainText(f"Начинаю скачивание {len(trick_segments)} трюковых сегментов...\nЭто может занять некоторое время.")
+            
+            # Принудительно обновляем UI
+            QApplication.processEvents()
+            
+            # Скачиваем видео сегменты
+            downloaded_files = vp.extract_video_segments(video_id, trick_segments)
+            
+            if downloaded_files:
+                result_lines = [f"Успешно скачано {len(downloaded_files)} видео трюков из видео \"{self.video_info.get('title', 'Без названия')}\":\n"]
+                for i, file_path in enumerate(downloaded_files):
+                    seg = trick_segments[i]
+                    start_td = self.seconds_to_timecode(seg['start'])
+                    end_td = self.seconds_to_timecode(seg['end'])
+                    duration_td = self.seconds_to_timecode(seg['duration'])
+                    result_lines.append(f"- {file_path}")
+                    result_lines.append(f"  Время: {start_td} - {end_td} (Длительность: {duration_td})")
+                
+                result_lines.append(f"\nВсе файлы сохранены в папке 'tricks'")
+                self.output_text_area.setPlainText("\n".join(result_lines))
+            else:
+                self.output_text_area.setPlainText("Не удалось скачать видео сегменты.")
+
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка при скачивании трюков", str(e))
+            logging.error(f"Ошибка при скачивании трюков: {e}", exc_info=True)
 
     def seconds_to_timecode(self, seconds):
         import datetime
