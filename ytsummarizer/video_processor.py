@@ -2,6 +2,7 @@ import re
 import os
 import subprocess
 from yt_dlp import YoutubeDL
+from datetime import timedelta
 
 DEFAULT_MIN_SILENCE_DURATION = 2.0  # Минимальная длительность "тихого" сегмента в секундах, чтобы считать его трюком
 DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT = 3 # Максимальное количество слов в сегменте, чтобы он считался "тихим"
@@ -109,9 +110,54 @@ def extract_trick_segments(
 
     return trick_segments
 
-def extract_video_segments(video_id: str, segments: list[dict], output_dir: str = "tricks") -> list[str]:
+
+def _find_nearest_keyframe(video_file: str, timestamp: float) -> float | None:
     """
-    Извлекает видео сегменты из YouTube видео в максимальном качестве.
+    Находит ближайший ключевой кадр (I-frame) перед указанным тайм-кодом.
+    Возвращает тайм-код ключевого кадра или None, если не найден.
+    """
+    cmd = [
+        'ffprobe',
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'frame=key_frame,pkt_pts_time',
+        '-of', 'csv=p=0',
+        video_file
+    ]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        keyframe_times = []
+        for line in result.stdout.strip().split('\n'):
+            if not line:
+                continue
+            parts = line.split(',')
+            if len(parts) != 2:
+                continue
+            is_key, time_str = parts
+            if is_key == '1' and time_str not in ('N/A', ''):
+                try:
+                    keyframe_times.append(float(time_str))
+                except ValueError:
+                    continue
+
+        # Найти последний ключевой кадр, который меньше или равен timestamp
+        valid_keyframes = [t for t in keyframe_times if t <= timestamp]
+        if valid_keyframes:
+            return max(valid_keyframes)
+        return 0.0  # Если до тайм-кода нет ключей, начинаем с самого начала
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # Если ffprobe не найден или выдал ошибку, возвращаем None, чтобы использовать перекодирование
+        print("ffprobe не найден. Будет применено перекодирование для точной нарезки.")
+        return None
+    except Exception as e:
+        print(f"Неожиданная ошибка при работе с ffprobe: {e}")
+        return None
+
+
+def extract_video_segments(video_id: str, segments: list[dict], output_dir: str = "tricks", reencode_threshold: float = 0.5) -> list[str]:
+    """
+    Извлекает видео сегменты из YouTube видео в максимальном качестве,
+    избегая черных экранов в начале.
     
     Args:
         video_id: ID YouTube видео
@@ -138,7 +184,7 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
     
     # Скачиваем видео в максимальном доступном качестве (отдельно видео+аудио, затем мерж)
     download_opts = {
-        'format': 'bestvideo+bestaudio/best',  # лучшее видео + лучшее аудио, если не поддерживается — best
+        'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best',  # максимум 1080p
         'outtmpl': os.path.join(output_dir, f'{video_id}.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
@@ -173,41 +219,68 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
             
         video_file = actual_video_file
         print(f"Скачан файл: {os.path.basename(video_file)}")
-            
+
         # Извлекаем сегменты с помощью ffmpeg
         segment_files = []
         for i, segment in enumerate(valid_segments):
             start_time = segment['start']
             duration = segment['duration']
+            end_time = start_time + duration
+
+            # Определяем стратегию нарезки
+            nearest_keyframe_time = _find_nearest_keyframe(video_file, start_time)
             
-            # Форматируем время для ffmpeg
-            start_str = _seconds_to_ffmpeg_time(start_time)
-            duration_str = _seconds_to_ffmpeg_time(duration)
-            
-            # Имя файла сегмента
-            segment_filename = f"{video_id}_trick_{i+1}_{start_str.replace(':', '-')}_({duration:.1f}s).mp4"
-            segment_path = os.path.join(output_dir, segment_filename)
-            
-            # Команда ffmpeg для извлечения сегмента (копируем без перекодирования для сохранения качества)
-            cmd = [
-                'ffmpeg',
-                '-i', video_file,
-                '-ss', start_str,
-                '-t', duration_str,
-                '-c', 'copy',  # Копируем без перекодирования для сохранения исходного качества
-                '-avoid_negative_ts', 'make_zero',
-                segment_path,
-                '-y'  # Перезаписываем файл если существует
-            ]
-            
+            cmd = []
+            segment_filename = ""
+
+            # Если ffprobe не сработал или ключевой кадр слишком далеко -> перекодируем
+            if nearest_keyframe_time is None or (start_time - nearest_keyframe_time > reencode_threshold):
+                print(f"Сегмент {i+1}: Ключевой кадр далеко/не найден. Применяем точное перекодирование.")
+                start_str = _seconds_to_ffmpeg_time(start_time)
+                duration_str = _seconds_to_ffmpeg_time(duration)
+                segment_filename = f"{video_id}_trick_{i+1}_{start_str.replace(':', '-')}_({duration:.1f}s)_re-encoded.mp4"
+                segment_path = os.path.join(output_dir, segment_filename)
+                cmd = [
+                    'ffmpeg',
+                    '-i', video_file,
+                    '-ss', start_str,
+                    '-t', duration_str,
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '18',
+                    '-c:a', 'aac',
+                    '-b:a', '192k',
+                    segment_path,
+                    '-y'
+                ]
+            else:
+                # Иначе используем быструю нарезку, начиная с ближайшего ключевого кадра
+                print(f"Сегмент {i+1}: Ключевой кадр близко. Применяем быструю нарезку.")
+                start_str = _seconds_to_ffmpeg_time(nearest_keyframe_time)
+                duration_str = _seconds_to_ffmpeg_time(duration)
+                requested_start_str_for_fn = _seconds_to_ffmpeg_time(start_time).replace(':', '-')
+                segment_filename = f"{video_id}_trick_{i+1}_{requested_start_str_for_fn}_({duration:.1f}s)_copied.mp4"
+                segment_path = os.path.join(output_dir, segment_filename)
+                cmd = [
+                    'ffmpeg',
+                    '-ss', start_str,  # быстрый seek к ключу
+                    '-i', video_file,
+                    '-t', duration_str,
+                    '-c', 'copy',
+                    '-map', '0',
+                    '-avoid_negative_ts', 'make_zero',
+                    segment_path,
+                    '-y'
+                ]
+
             try:
                 result = subprocess.run(cmd, check=True, capture_output=True, text=True)
                 segment_files.append(segment_path)
-                print(f"Создан сегмент {i+1}: {segment_filename}")
+                print(f"-> Создан сегмент: {segment_filename}")
             except subprocess.CalledProcessError as e:
-                print(f"Ошибка при извлечении сегмента {i+1}: {e.stderr}")
+                print(f"Ошибка при извлечении сегмента {i+1} ({segment_filename}):\n{e.stderr}")
                 continue
-        
+
         # Удаляем исходное видео после извлечения сегментов
         try:
             os.remove(video_file)
@@ -219,9 +292,10 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
     except Exception as e:
         raise RuntimeError(f"Ошибка при извлечении видео сегментов: {e}")
 
+
 def _seconds_to_ffmpeg_time(seconds: float) -> str:
-    """Конвертирует секунды в формат времени ffmpeg (HH:MM:SS)"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    """Конвертирует секунды в формат времени ffmpeg (HH:MM:SS.mmm)"""
+    if not isinstance(seconds, (int, float)):
+        seconds = 0.0
+    td = timedelta(seconds=seconds)
+    return str(td)
