@@ -1,0 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+1. use OPENAI_API_KEY only from user-devined system variable.
+2. не надо ничего реализовывать в виде кода и спрашивать меня о реализации, пока я сам явно не попрошу об этом.
+
