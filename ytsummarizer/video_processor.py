@@ -159,9 +159,9 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
     
     url = f"https://www.youtube.com/watch?v={video_id}"
     
-    # Скачиваем видео в максимальном доступном качестве (отдельно видео+аудио, затем мерж)
+    # Скачиваем видео в качестве до 1080p для оптимизации скорости и размера
     download_opts = {
-        'format': 'bestvideo+bestaudio/best',  # лучшее видео + лучшее аудио, если не поддерживается — best
+        'format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',  # ограничиваем качество до 1080p
         'outtmpl': os.path.join(video_output_dir, f'{video_id}.%(ext)s'),
         'quiet': True,
         'no_warnings': True,
@@ -217,14 +217,17 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
             segment_filename = f"trick_{i+1}_{start_str.replace(':', '-')}_({duration:.1f}s).mp4"
             segment_path = os.path.join(video_output_dir, segment_filename)
             
-            # Команда ffmpeg для извлечения сегмента (копируем без перекодирования для сохранения качества)
+            # Команда ffmpeg для извлечения сегмента с точным позиционированием
+            # Перемещаем -ss перед -i для более точного позиционирования
             cmd = [
                 'ffmpeg',
+                '-ss', start_str,  # Точное позиционирование перед входным файлом
                 '-i', video_file,
-                '-ss', start_str,
                 '-t', duration_str,
                 '-c', 'copy',  # Копируем без перекодирования для сохранения исходного качества
+                '-fflags', '+genpts',  # Регенерация временных меток
                 '-avoid_negative_ts', 'make_zero',
+                '-copyts',  # Сохранение временных меток
                 segment_path,
                 '-y'  # Перезаписываем файл если существует
             ]

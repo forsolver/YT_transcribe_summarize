@@ -166,11 +166,15 @@ class BatchProcessor:
             total_videos=len(videos)
         )
         
+        print(f"[DEBUG] Starting batch processing of {len(videos)} videos from {source_info.name}")
         self._report_progress(0, len(videos), "Starting batch processing...")
         
         for i, video in enumerate(videos):
+            print(f"[DEBUG] Processing video {i+1}/{len(videos)}: {video.title}")
+            
             # Check for cancellation
             if self.cancel_token and self.cancel_token.is_set():
+                print(f"[DEBUG] Batch processing cancelled at video {i+1}")
                 result.cancelled = True
                 self._report_progress(i, len(videos), "Processing cancelled")
                 break
@@ -179,23 +183,43 @@ class BatchProcessor:
             self._report_progress(i, len(videos), f"Processing: {video.title}")
             
             # Process individual video
-            video_result = self._process_single_video(video, source_info, options)
-            result.processed_videos += 1
-            
-            if video_result.success:
-                result.successful_extractions += 1
-                result.total_tricks += video_result.tricks_found
-                result.total_segments += len(video_result.segments_extracted)
-            else:
-                if video_result.error:
-                    result.errors.append(video_result.error)
+            try:
+                video_result = self._process_single_video(video, source_info, options)
+                result.processed_videos += 1
+                
+                if video_result.success:
+                    result.successful_extractions += 1
+                    result.total_tricks += video_result.tricks_found
+                    result.total_segments += len(video_result.segments_extracted)
+                    print(f"[DEBUG] Video {i+1} processed successfully: {video_result.tricks_found} tricks, {len(video_result.segments_extracted)} segments")
+                else:
+                    if video_result.error:
+                        result.errors.append(video_result.error)
+                        print(f"[DEBUG] Video {i+1} failed: {video_result.error.error_type} - {video_result.error.error_message}")
+                
+            except Exception as e:
+                print(f"[DEBUG] Critical error processing video {i+1}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                error = ProcessingError(
+                    video_id=video.video_id,
+                    video_title=video.title,
+                    error_type="CRITICAL_ERROR",
+                    error_message=f"Critical error in batch processing: {str(e)}"
+                )
+                result.errors.append(error)
+                result.processed_videos += 1
             
             # Small delay to prevent overwhelming the system
             time.sleep(0.5)
+            print(f"[DEBUG] Completed video {i+1}/{len(videos)}, continuing to next...")
         
         # Final progress report
         if not result.cancelled:
+            print(f"[DEBUG] Batch processing completed successfully")
             self._report_progress(len(videos), len(videos), "Batch processing complete")
+        
+        print(f"[DEBUG] Final stats: {result.processed_videos} processed, {result.successful_extractions} successful, {len(result.errors)} errors")
         
         return result
     
@@ -242,19 +266,25 @@ class BatchProcessor:
         start_time = time.time()
         result = VideoProcessingResult(video_info=video_info)
         
+        print(f"[DEBUG] Starting processing video: {video_info.title} (ID: {video_info.video_id})")
+        
         try:
             # Check if we should skip existing
             if options.skip_existing:
                 video_folder = self.create_folder_structure(source_info, video_info, options.output_dir)
                 if os.path.exists(video_folder) and os.listdir(video_folder):
+                    print(f"[DEBUG] Skipping existing video: {video_info.title}")
                     result.success = True
                     result.processing_time = time.time() - start_time
                     return result
             
+            print(f"[DEBUG] Getting transcript for video: {video_info.video_id}")
             # Get transcript
             try:
                 plain_text, fragments, video_info_detailed = get_transcript(video_info.video_id)
+                print(f"[DEBUG] Successfully got transcript with {len(fragments)} fragments")
             except Exception as e:
+                print(f"[DEBUG] Failed to get transcript: {str(e)}")
                 result.error = ProcessingError(
                     video_id=video_info.video_id,
                     video_title=video_info.title,
@@ -264,16 +294,20 @@ class BatchProcessor:
                 result.processing_time = time.time() - start_time
                 return result
             
+            print(f"[DEBUG] Extracting trick segments...")
             # Extract trick segments
             try:
                 trick_segments = extract_trick_segments(fragments)
                 result.tricks_found = len(trick_segments)
+                print(f"[DEBUG] Found {len(trick_segments)} trick segments")
                 
                 if trick_segments:
                     # Create folder structure
                     video_folder = self.create_folder_structure(source_info, video_info, options.output_dir)
+                    print(f"[DEBUG] Created folder: {video_folder}")
                     
                     # Extract video segments
+                    print(f"[DEBUG] Starting video segment extraction...")
                     extracted_files = extract_video_segments(
                         video_info.video_id, 
                         trick_segments, 
@@ -281,10 +315,17 @@ class BatchProcessor:
                         video_info=video_info_detailed
                     )
                     result.segments_extracted = extracted_files
+                    print(f"[DEBUG] Successfully extracted {len(extracted_files)} video segments")
+                else:
+                    print(f"[DEBUG] No trick segments found for video: {video_info.title}")
                 
                 result.success = True
+                print(f"[DEBUG] Successfully completed processing video: {video_info.title}")
                 
             except Exception as e:
+                print(f"[DEBUG] Error during trick extraction: {str(e)}")
+                import traceback
+                traceback.print_exc()
                 result.error = ProcessingError(
                     video_id=video_info.video_id,
                     video_title=video_info.title,
@@ -293,6 +334,9 @@ class BatchProcessor:
                 )
         
         except Exception as e:
+            print(f"[DEBUG] Unexpected error processing video {video_info.title}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             result.error = ProcessingError(
                 video_id=video_info.video_id,
                 video_title=video_info.title,
@@ -301,6 +345,7 @@ class BatchProcessor:
             )
         
         result.processing_time = time.time() - start_time
+        print(f"[DEBUG] Finished processing video: {video_info.title} (Success: {result.success}, Time: {result.processing_time:.1f}s)")
         return result
     
     def _apply_filters(self, videos: List[VideoInfo], options: BatchOptions) -> List[VideoInfo]:
