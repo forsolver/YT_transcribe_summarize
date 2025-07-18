@@ -372,12 +372,16 @@ class BatchProcessor:
                     
                     # Extract video segments
                     print(f"[DEBUG] Starting video segment extraction...")
+                    print(f"[DEBUG] Calling extract_video_segments with {len(trick_segments)} segments")
+                    
                     extracted_files = extract_video_segments(
                         video_info.video_id, 
                         trick_segments, 
                         output_dir=video_folder,
                         video_info=video_info_detailed
                     )
+                    
+                    print(f"[DEBUG] extract_video_segments returned successfully")
                     result.segments_extracted = extracted_files
                     print(f"[DEBUG] Successfully extracted {len(extracted_files)} video segments")
                 else:

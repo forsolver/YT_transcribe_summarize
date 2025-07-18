@@ -198,8 +198,10 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
         print(f"Скачан файл: {os.path.basename(video_file)}")
             
         # Извлекаем сегменты с помощью ffmpeg
+        print(f"[DEBUG] Starting extraction of {len(valid_segments)} video segments")
         segment_files = []
         for i, segment in enumerate(valid_segments):
+            print(f"[DEBUG] Processing segment {i+1}/{len(valid_segments)}")
             # Корректируем время начала, чтобы избежать черного экрана в начале
             # Вычитаем 2 секунды, но не уходим в отрицательное время
             start_time = max(0, segment['start'] - 2.0)
@@ -284,11 +286,22 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
                 continue
         
         # Удаляем исходное видео после извлечения сегментов
+        print(f"[DEBUG] Attempting to remove source video file: {os.path.basename(video_file)}")
         try:
-            os.remove(video_file)
-        except OSError:
-            pass
+            # На Windows файл может быть заблокирован, добавляем небольшую задержку
+            import time
+            time.sleep(1)
             
+            if os.path.exists(video_file):
+                os.remove(video_file)
+                print(f"[DEBUG] Successfully removed source video file")
+            else:
+                print(f"[DEBUG] Source video file already removed or doesn't exist")
+        except OSError as e:
+            print(f"[DEBUG] Could not remove source video file: {e} (this is not critical)")
+            pass
+        
+        print(f"[DEBUG] extract_video_segments completed successfully, returning {len(segment_files)} files")
         return segment_files
 
     except Exception as e:
