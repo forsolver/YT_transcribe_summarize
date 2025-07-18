@@ -217,27 +217,70 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
             segment_filename = f"trick_{i+1}_{start_str.replace(':', '-')}_({duration:.1f}s).mp4"
             segment_path = os.path.join(video_output_dir, segment_filename)
             
-            # Команда ffmpeg для извлечения сегмента с точным позиционированием
-            # Перемещаем -ss перед -i для более точного позиционирования
-            cmd = [
+            # Команда ffmpeg для извлечения сегмента - с fallback на перекодирование
+            cmd_copy = [
                 'ffmpeg',
                 '-ss', start_str,  # Точное позиционирование перед входным файлом
                 '-i', video_file,
                 '-t', duration_str,
-                '-c', 'copy',  # Копируем без перекодирования для сохранения исходного качества
-                '-fflags', '+genpts',  # Регенерация временных меток
-                '-avoid_negative_ts', 'make_zero',
-                '-copyts',  # Сохранение временных меток
+                '-c', 'copy',  # Копируем без перекодирования
+                '-avoid_negative_ts', 'make_zero',  # Исправляем отрицательные временные метки
                 segment_path,
                 '-y'  # Перезаписываем файл если существует
             ]
             
+            # Fallback команда с перекодированием для проблемных файлов
+            cmd_reencode = [
+                'ffmpeg',
+                '-ss', start_str,
+                '-i', video_file,
+                '-t', duration_str,
+                '-c:v', 'libx264',  # Перекодируем видео
+                '-c:a', 'aac',      # Перекодируем аудио
+                '-preset', 'fast',   # Быстрое кодирование
+                '-crf', '23',        # Хорошее качество
+                segment_path,
+                '-y'
+            ]
+            
+            success = False
+            
+            # Сначала пробуем копирование (быстрее)
             try:
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                segment_files.append(segment_path)
-                print(f"Создан сегмент {i+1}: {segment_filename}")
+                print(f"[DEBUG] Trying copy mode for segment {i+1}...")
+                result = subprocess.run(cmd_copy, check=True, capture_output=True, text=True)
+                
+                # Проверяем, что файл создался и не пустой
+                if os.path.exists(segment_path) and os.path.getsize(segment_path) > 1000:
+                    segment_files.append(segment_path)
+                    print(f"Создан сегмент {i+1} (copy mode): {segment_filename}")
+                    success = True
+                else:
+                    print(f"[DEBUG] Copy mode created empty/small file for segment {i+1}")
+                    if os.path.exists(segment_path):
+                        os.remove(segment_path)
+                    
             except subprocess.CalledProcessError as e:
-                print(f"Ошибка при извлечении сегмента {i+1}: {e.stderr}")
+                print(f"[DEBUG] Copy mode failed for segment {i+1}: {e.stderr}")
+            
+            # Если копирование не сработало, пробуем перекодирование
+            if not success:
+                try:
+                    print(f"[DEBUG] Trying re-encode mode for segment {i+1}...")
+                    result = subprocess.run(cmd_reencode, check=True, capture_output=True, text=True)
+                    
+                    if os.path.exists(segment_path) and os.path.getsize(segment_path) > 1000:
+                        segment_files.append(segment_path)
+                        print(f"Создан сегмент {i+1} (re-encode mode): {segment_filename}")
+                        success = True
+                    else:
+                        print(f"[DEBUG] Re-encode mode created empty/small file for segment {i+1}")
+                        
+                except subprocess.CalledProcessError as e:
+                    print(f"Ошибка при извлечении сегмента {i+1} (re-encode): {e.stderr}")
+            
+            if not success:
+                print(f"[ERROR] Failed to create segment {i+1} with both copy and re-encode modes")
                 continue
         
         # Удаляем исходное видео после извлечения сегментов

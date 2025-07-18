@@ -106,11 +106,32 @@ class BatchProcessor:
         Returns:
             BatchResult with processing statistics and results
         """
+        print(f"[DEBUG] Starting process_source with URL: {source_url}")
         start_time = time.time()
         
         # Get source metadata
-        source_info = get_source_metadata(source_url)
-        if not source_info:
+        print(f"[DEBUG] Getting source metadata...")
+        try:
+            source_info = get_source_metadata(source_url)
+            if not source_info:
+                print(f"[DEBUG] Failed to get source metadata")
+                result = BatchResult(
+                    source_info=SourceInfo("Unknown", URLType.INVALID, source_url, 0),
+                    processing_time=time.time() - start_time
+                )
+                result.errors.append(ProcessingError(
+                    video_id="",
+                    video_title="",
+                    error_type="SOURCE_ERROR",
+                    error_message=f"Could not get information about source: {source_url}"
+                ))
+                return result
+            else:
+                print(f"[DEBUG] Got source metadata: {source_info.name}, {source_info.total_videos} videos")
+        except Exception as e:
+            print(f"[DEBUG] Exception getting source metadata: {e}")
+            import traceback
+            traceback.print_exc()
             result = BatchResult(
                 source_info=SourceInfo("Unknown", URLType.INVALID, source_url, 0),
                 processing_time=time.time() - start_time
@@ -119,13 +140,37 @@ class BatchProcessor:
                 video_id="",
                 video_title="",
                 error_type="SOURCE_ERROR",
-                error_message=f"Could not get information about source: {source_url}"
+                error_message=f"Exception getting source info: {str(e)}"
             ))
             return result
         
         # Extract video list
-        videos = extract_video_list(source_url, limit=options.max_videos)
-        if not videos:
+        print(f"[DEBUG] Extracting video list (limit: {options.max_videos})...")
+        try:
+            videos = extract_video_list(source_url, limit=options.max_videos)
+            if not videos:
+                print(f"[DEBUG] No videos found in source")
+                result = BatchResult(
+                    source_info=source_info,
+                    processing_time=time.time() - start_time
+                )
+                result.errors.append(ProcessingError(
+                    video_id="",
+                    video_title="",
+                    error_type="VIDEO_LIST_ERROR",
+                    error_message="No videos found in source or failed to extract video list"
+                ))
+                return result
+            else:
+                print(f"[DEBUG] Extracted {len(videos)} videos from source")
+                for i, video in enumerate(videos[:3]):  # Show first 3 videos
+                    print(f"[DEBUG]   {i+1}. {video.title} ({video.video_id})")
+                if len(videos) > 3:
+                    print(f"[DEBUG]   ... and {len(videos) - 3} more videos")
+        except Exception as e:
+            print(f"[DEBUG] Exception extracting video list: {e}")
+            import traceback
+            traceback.print_exc()
             result = BatchResult(
                 source_info=source_info,
                 processing_time=time.time() - start_time
@@ -134,19 +179,38 @@ class BatchProcessor:
                 video_id="",
                 video_title="",
                 error_type="VIDEO_LIST_ERROR",
-                error_message="No videos found in source or failed to extract video list"
+                error_message=f"Exception extracting video list: {str(e)}"
             ))
             return result
         
         # Apply filters
+        print(f"[DEBUG] Applying filters...")
         filtered_videos = self._apply_filters(videos, options)
+        print(f"[DEBUG] After filtering: {len(filtered_videos)} videos remain")
         
         # Process videos
-        result = self.process_video_list(filtered_videos, source_info, options)
-        result.processing_time = time.time() - start_time
-        result.end_time = datetime.now()
-        
-        return result
+        print(f"[DEBUG] Starting video processing...")
+        try:
+            result = self.process_video_list(filtered_videos, source_info, options)
+            result.processing_time = time.time() - start_time
+            result.end_time = datetime.now()
+            print(f"[DEBUG] process_source completed successfully")
+            return result
+        except Exception as e:
+            print(f"[DEBUG] Exception in process_video_list: {e}")
+            import traceback
+            traceback.print_exc()
+            result = BatchResult(
+                source_info=source_info,
+                processing_time=time.time() - start_time
+            )
+            result.errors.append(ProcessingError(
+                video_id="",
+                video_title="",
+                error_type="PROCESSING_ERROR",
+                error_message=f"Exception in video processing: {str(e)}"
+            ))
+            return result
     
     def process_video_list(self, videos: List[VideoInfo], source_info: SourceInfo, 
                           options: BatchOptions) -> BatchResult:
