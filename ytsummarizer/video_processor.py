@@ -116,7 +116,7 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
     Args:
         video_id: ID YouTube видео
         segments: Список сегментов с полями 'start', 'end', 'duration'
-        output_dir: Директория для сохранения сегментов
+        output_dir: Директория для сохранения сегментов (может быть уже подготовленной для batch processing)
         video_info: Информация о видео (title, duration)
         
     Returns:
@@ -132,23 +132,30 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
         print("Нет сегментов длиннее 10 секунд")
         return []
     
-    # Создаем основную директорию для сохранения
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Получаем название видео и создаем подпапку
-    video_title = "Unnamed_Video"
-    if video_info and video_info.get("title"):
-        video_title = video_info.get("title")
-    
-    # Создаем безопасное имя папки из названия видео
-    safe_folder_name = "".join([c if c.isalnum() or c in [' ', '-', '_'] else '_' for c in video_title])
-    safe_folder_name = safe_folder_name.strip()[:50]  # Ограничиваем длину
-    if not safe_folder_name:  # Если после очистки имя пустое
-        safe_folder_name = f"video_{video_id}"
-    
-    # Создаем подпапку для этого видео
-    video_output_dir = os.path.join(output_dir, safe_folder_name)
-    os.makedirs(video_output_dir, exist_ok=True)
+    # Определяем выходную директорию
+    # Если output_dir уже содержит полный путь (для batch processing), используем его как есть
+    # Иначе создаем структуру как раньше (для backward compatibility)
+    if os.path.basename(output_dir) != "tricks" and os.path.exists(output_dir):
+        # Batch processing mode - output_dir уже подготовлен
+        video_output_dir = output_dir
+    else:
+        # Single video mode - создаем структуру как раньше
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Получаем название видео и создаем подпапку
+        video_title = "Unnamed_Video"
+        if video_info and video_info.get("title"):
+            video_title = video_info.get("title")
+        
+        # Создаем безопасное имя папки из названия видео
+        safe_folder_name = "".join([c if c.isalnum() or c in [' ', '-', '_'] else '_' for c in video_title])
+        safe_folder_name = safe_folder_name.strip()[:50]  # Ограничиваем длину
+        if not safe_folder_name:  # Если после очистки имя пустое
+            safe_folder_name = f"video_{video_id}"
+        
+        # Создаем подпапку для этого видео
+        video_output_dir = os.path.join(output_dir, safe_folder_name)
+        os.makedirs(video_output_dir, exist_ok=True)
     
     url = f"https://www.youtube.com/watch?v={video_id}"
     

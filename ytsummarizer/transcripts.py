@@ -5,12 +5,23 @@ import requests
 from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi
 from yt_dlp import YoutubeDL
+from datetime import datetime
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass
+
+from .url_detector import URLDetector, URLType
 
 __all__ = [
     "get_transcript",
     "extract_video_id",
     "get_video_info",
-    "clear_transcript_cache"
+    "clear_transcript_cache",
+    "get_channel_info",
+    "get_playlist_info", 
+    "extract_video_list",
+    "get_source_metadata",
+    "SourceInfo",
+    "VideoInfo"
 ]
 
 # Создаем директорию для кэша, если её нет
@@ -20,6 +31,31 @@ os.makedirs(TRANSCRIPT_CACHE_DIR, exist_ok=True)
 
 # Время жизни кэша в секундах (7 дней)
 CACHE_TTL = 7 * 24 * 60 * 60
+
+
+@dataclass
+class SourceInfo:
+    """Information about a YouTube source (channel or playlist)."""
+    name: str
+    type: URLType
+    url: str
+    total_videos: int
+    description: Optional[str] = None
+    channel_id: Optional[str] = None
+    playlist_id: Optional[str] = None
+
+
+@dataclass
+class VideoInfo:
+    """Information about a single YouTube video."""
+    video_id: str
+    title: str
+    url: str
+    duration: Optional[int] = None
+    upload_date: Optional[datetime] = None
+    thumbnail_url: Optional[str] = None
+    view_count: Optional[int] = None
+    description: Optional[str] = None
 
 def get_video_info(video_id: str):
     """Возвращает информацию о видео, включая длительность."""
@@ -277,4 +313,214 @@ def _parse_xml_captions(xml_text: str):
         text = html.unescape(m.group("text").replace("\n", " ")).strip()
         if text:
             entries.append({"start": start, "text": text})
-    return entries if entries else None 
+    return entries if entries else None
+
+
+# ---------- Batch Processing Functions ----------
+
+def get_channel_info(channel_url: str) -> Optional[SourceInfo]:
+    """
+    Get information about a YouTube channel.
+    
+    Args:
+        channel_url: URL of the YouTube channel
+        
+    Returns:
+        SourceInfo object with channel metadata or None if failed
+    """
+    detector = URLDetector()
+    if detector.detect_url_type(channel_url) != URLType.CHANNEL:
+        return None
+    
+    ydl_opts = {
+        "skip_download": True,
+        "quiet": True,
+        "nocheckcertificate": True,
+        "extract_flat": True,  # Don't extract individual video info
+    }
+    
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(channel_url, download=False)
+            
+            # Sanitize channel name for folder creation
+            channel_name = info.get("title", "Unknown Channel")
+            safe_name = _sanitize_folder_name(channel_name)
+            
+            return SourceInfo(
+                name=safe_name,
+                type=URLType.CHANNEL,
+                url=channel_url,
+                total_videos=len(info.get("entries", [])),
+                description=info.get("description"),
+                channel_id=info.get("channel_id") or info.get("id")
+            )
+    except Exception as e:
+        print(f"Error getting channel info: {e}")
+        return None
+
+
+def get_playlist_info(playlist_url: str) -> Optional[SourceInfo]:
+    """
+    Get information about a YouTube playlist.
+    
+    Args:
+        playlist_url: URL of the YouTube playlist
+        
+    Returns:
+        SourceInfo object with playlist metadata or None if failed
+    """
+    detector = URLDetector()
+    if detector.detect_url_type(playlist_url) != URLType.PLAYLIST:
+        return None
+    
+    ydl_opts = {
+        "skip_download": True,
+        "quiet": True,
+        "nocheckcertificate": True,
+        "extract_flat": True,  # Don't extract individual video info
+    }
+    
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(playlist_url, download=False)
+            
+            # Sanitize playlist name for folder creation
+            playlist_name = info.get("title", "Unknown Playlist")
+            safe_name = _sanitize_folder_name(playlist_name)
+            
+            return SourceInfo(
+                name=safe_name,
+                type=URLType.PLAYLIST,
+                url=playlist_url,
+                total_videos=len(info.get("entries", [])),
+                description=info.get("description"),
+                playlist_id=info.get("id")
+            )
+    except Exception as e:
+        print(f"Error getting playlist info: {e}")
+        return None
+
+
+def extract_video_list(source_url: str, limit: Optional[int] = None) -> List[VideoInfo]:
+    """
+    Extract list of videos from a channel or playlist.
+    
+    Args:
+        source_url: URL of the channel or playlist
+        limit: Maximum number of videos to extract (None for all)
+        
+    Returns:
+        List of VideoInfo objects
+    """
+    detector = URLDetector()
+    url_type = detector.detect_url_type(source_url)
+    
+    if url_type not in [URLType.CHANNEL, URLType.PLAYLIST]:
+        return []
+    
+    ydl_opts = {
+        "skip_download": True,
+        "quiet": True,
+        "nocheckcertificate": True,
+        "extract_flat": False,  # Extract individual video info
+    }
+    
+    # Add playlist limit if specified
+    if limit:
+        ydl_opts["playlistend"] = limit
+    
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source_url, download=False)
+            
+            videos = []
+            entries = info.get("entries", [])
+            
+            for entry in entries:
+                if not entry:  # Skip None entries (unavailable videos)
+                    continue
+                
+                video_id = entry.get("id")
+                if not video_id:
+                    continue
+                
+                # Parse upload date
+                upload_date = None
+                if entry.get("upload_date"):
+                    try:
+                        upload_date = datetime.strptime(entry["upload_date"], "%Y%m%d")
+                    except ValueError:
+                        pass
+                
+                video_info = VideoInfo(
+                    video_id=video_id,
+                    title=entry.get("title", "Unknown Title"),
+                    url=f"https://www.youtube.com/watch?v={video_id}",
+                    duration=entry.get("duration"),
+                    upload_date=upload_date,
+                    thumbnail_url=entry.get("thumbnail"),
+                    view_count=entry.get("view_count"),
+                    description=entry.get("description")
+                )
+                videos.append(video_info)
+            
+            return videos
+            
+    except Exception as e:
+        print(f"Error extracting video list: {e}")
+        return []
+
+
+def get_source_metadata(source_url: str) -> Optional[SourceInfo]:
+    """
+    Get metadata about a YouTube source (channel or playlist).
+    
+    Args:
+        source_url: URL of the source
+        
+    Returns:
+        SourceInfo object or None if failed
+    """
+    detector = URLDetector()
+    url_type = detector.detect_url_type(source_url)
+    
+    if url_type == URLType.CHANNEL:
+        return get_channel_info(source_url)
+    elif url_type == URLType.PLAYLIST:
+        return get_playlist_info(source_url)
+    else:
+        return None
+
+
+def _sanitize_folder_name(name: str, max_length: int = 50) -> str:
+    """
+    Sanitize a string to be safe for use as a folder name.
+    
+    Args:
+        name: The original name
+        max_length: Maximum length of the sanitized name
+        
+    Returns:
+        Sanitized folder name
+    """
+    if not name:
+        return "Unknown"
+    
+    # Replace invalid characters with underscores
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    
+    # Replace multiple spaces with single spaces
+    name = ' '.join(name.split())
+    
+    # Truncate if too long
+    if len(name) > max_length:
+        name = name[:max_length].rstrip()
+    
+    # Ensure it's not empty after sanitization
+    if not name.strip():
+        return "Unknown"
+    
+    return name.strip() 

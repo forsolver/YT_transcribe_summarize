@@ -1,0 +1,409 @@
+"""
+Batch Processing Module for YouTube Tools
+
+This module provides functionality for processing multiple YouTube videos
+from channels and playlists in batch operations.
+"""
+
+import os
+import time
+import logging
+from typing import List, Dict, Optional, Callable, Any
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from threading import Event
+
+from .transcripts import (
+    get_source_metadata, extract_video_list, get_transcript, 
+    SourceInfo, VideoInfo
+)
+from .video_processor import extract_trick_segments, extract_video_segments
+from .url_detector import URLDetector, URLType
+
+
+@dataclass
+class BatchOptions:
+    """Configuration options for batch processing."""
+    max_videos: int = 50
+    skip_existing: bool = False
+    min_video_duration: Optional[int] = None  # seconds
+    max_video_duration: Optional[int] = None  # seconds
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None
+    output_dir: str = "tricks"
+
+
+@dataclass
+class ProcessingError:
+    """Information about a processing error."""
+    video_id: str
+    video_title: str
+    error_type: str
+    error_message: str
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class VideoProcessingResult:
+    """Result of processing a single video."""
+    video_info: VideoInfo
+    tricks_found: int = 0
+    segments_extracted: List[str] = field(default_factory=list)
+    processing_time: float = 0.0
+    success: bool = False
+    error: Optional[ProcessingError] = None
+
+
+@dataclass
+class BatchResult:
+    """Result of a batch processing operation."""
+    source_info: SourceInfo
+    total_videos: int = 0
+    processed_videos: int = 0
+    successful_extractions: int = 0
+    total_tricks: int = 0
+    total_segments: int = 0
+    errors: List[ProcessingError] = field(default_factory=list)
+    processing_time: float = 0.0
+    start_time: datetime = field(default_factory=datetime.now)
+    end_time: Optional[datetime] = None
+    cancelled: bool = False
+
+
+class BatchProcessor:
+    """
+    Processes multiple YouTube videos from channels and playlists.
+    
+    Provides functionality for:
+    - Extracting video lists from channels and playlists
+    - Processing videos sequentially with progress reporting
+    - Handling errors gracefully without stopping the batch
+    - Supporting cancellation of long-running operations
+    """
+    
+    def __init__(self, progress_callback: Optional[Callable] = None, 
+                 cancel_token: Optional[Event] = None):
+        """
+        Initialize the batch processor.
+        
+        Args:
+            progress_callback: Function to call for progress updates
+            cancel_token: Event object to check for cancellation requests
+        """
+        self.progress_callback = progress_callback
+        self.cancel_token = cancel_token
+        self.url_detector = URLDetector()
+        self.logger = logging.getLogger(__name__)
+    
+    def process_source(self, source_url: str, options: BatchOptions) -> BatchResult:
+        """
+        Process all videos from a YouTube source (channel or playlist).
+        
+        Args:
+            source_url: URL of the channel or playlist
+            options: Processing options and filters
+            
+        Returns:
+            BatchResult with processing statistics and results
+        """
+        start_time = time.time()
+        
+        # Get source metadata
+        source_info = get_source_metadata(source_url)
+        if not source_info:
+            result = BatchResult(
+                source_info=SourceInfo("Unknown", URLType.INVALID, source_url, 0),
+                processing_time=time.time() - start_time
+            )
+            result.errors.append(ProcessingError(
+                video_id="",
+                video_title="",
+                error_type="SOURCE_ERROR",
+                error_message=f"Could not get information about source: {source_url}"
+            ))
+            return result
+        
+        # Extract video list
+        videos = extract_video_list(source_url, limit=options.max_videos)
+        if not videos:
+            result = BatchResult(
+                source_info=source_info,
+                processing_time=time.time() - start_time
+            )
+            result.errors.append(ProcessingError(
+                video_id="",
+                video_title="",
+                error_type="VIDEO_LIST_ERROR",
+                error_message="No videos found in source or failed to extract video list"
+            ))
+            return result
+        
+        # Apply filters
+        filtered_videos = self._apply_filters(videos, options)
+        
+        # Process videos
+        result = self.process_video_list(filtered_videos, source_info, options)
+        result.processing_time = time.time() - start_time
+        result.end_time = datetime.now()
+        
+        return result
+    
+    def process_video_list(self, videos: List[VideoInfo], source_info: SourceInfo, 
+                          options: BatchOptions) -> BatchResult:
+        """
+        Process a list of videos for trick extraction.
+        
+        Args:
+            videos: List of VideoInfo objects to process
+            source_info: Information about the source
+            options: Processing options
+            
+        Returns:
+            BatchResult with processing statistics
+        """
+        result = BatchResult(
+            source_info=source_info,
+            total_videos=len(videos)
+        )
+        
+        self._report_progress(0, len(videos), "Starting batch processing...")
+        
+        for i, video in enumerate(videos):
+            # Check for cancellation
+            if self.cancel_token and self.cancel_token.is_set():
+                result.cancelled = True
+                self._report_progress(i, len(videos), "Processing cancelled")
+                break
+            
+            # Report progress
+            self._report_progress(i, len(videos), f"Processing: {video.title}")
+            
+            # Process individual video
+            video_result = self._process_single_video(video, source_info, options)
+            result.processed_videos += 1
+            
+            if video_result.success:
+                result.successful_extractions += 1
+                result.total_tricks += video_result.tricks_found
+                result.total_segments += len(video_result.segments_extracted)
+            else:
+                if video_result.error:
+                    result.errors.append(video_result.error)
+            
+            # Small delay to prevent overwhelming the system
+            time.sleep(0.5)
+        
+        # Final progress report
+        if not result.cancelled:
+            self._report_progress(len(videos), len(videos), "Batch processing complete")
+        
+        return result
+    
+    def create_folder_structure(self, source_info: SourceInfo, video_info: VideoInfo, 
+                              base_dir: str = "tricks") -> str:
+        """
+        Create nested folder structure for batch processing.
+        
+        Args:
+            source_info: Information about the source
+            video_info: Information about the video
+            base_dir: Base directory for output
+            
+        Returns:
+            Path to the created folder structure
+        """
+        # Create base directory
+        os.makedirs(base_dir, exist_ok=True)
+        
+        # Create source folder
+        source_folder = os.path.join(base_dir, source_info.name)
+        os.makedirs(source_folder, exist_ok=True)
+        
+        # Create video folder
+        video_folder_name = self._sanitize_folder_name(video_info.title)
+        video_folder = os.path.join(source_folder, video_folder_name)
+        os.makedirs(video_folder, exist_ok=True)
+        
+        return video_folder
+    
+    def _process_single_video(self, video_info: VideoInfo, source_info: SourceInfo, 
+                             options: BatchOptions) -> VideoProcessingResult:
+        """
+        Process a single video for trick extraction.
+        
+        Args:
+            video_info: Information about the video to process
+            source_info: Information about the source
+            options: Processing options
+            
+        Returns:
+            VideoProcessingResult with processing details
+        """
+        start_time = time.time()
+        result = VideoProcessingResult(video_info=video_info)
+        
+        try:
+            # Check if we should skip existing
+            if options.skip_existing:
+                video_folder = self.create_folder_structure(source_info, video_info, options.output_dir)
+                if os.path.exists(video_folder) and os.listdir(video_folder):
+                    result.success = True
+                    result.processing_time = time.time() - start_time
+                    return result
+            
+            # Get transcript
+            try:
+                plain_text, fragments, video_info_detailed = get_transcript(video_info.video_id)
+            except Exception as e:
+                result.error = ProcessingError(
+                    video_id=video_info.video_id,
+                    video_title=video_info.title,
+                    error_type="TRANSCRIPT_ERROR",
+                    error_message=f"Failed to get transcript: {str(e)}"
+                )
+                result.processing_time = time.time() - start_time
+                return result
+            
+            # Extract trick segments
+            try:
+                trick_segments = extract_trick_segments(fragments)
+                result.tricks_found = len(trick_segments)
+                
+                if trick_segments:
+                    # Create folder structure
+                    video_folder = self.create_folder_structure(source_info, video_info, options.output_dir)
+                    
+                    # Extract video segments
+                    extracted_files = extract_video_segments(
+                        video_info.video_id, 
+                        trick_segments, 
+                        output_dir=video_folder,
+                        video_info=video_info_detailed
+                    )
+                    result.segments_extracted = extracted_files
+                
+                result.success = True
+                
+            except Exception as e:
+                result.error = ProcessingError(
+                    video_id=video_info.video_id,
+                    video_title=video_info.title,
+                    error_type="EXTRACTION_ERROR",
+                    error_message=f"Failed to extract tricks: {str(e)}"
+                )
+        
+        except Exception as e:
+            result.error = ProcessingError(
+                video_id=video_info.video_id,
+                video_title=video_info.title,
+                error_type="UNKNOWN_ERROR",
+                error_message=f"Unexpected error: {str(e)}"
+            )
+        
+        result.processing_time = time.time() - start_time
+        return result
+    
+    def _apply_filters(self, videos: List[VideoInfo], options: BatchOptions) -> List[VideoInfo]:
+        """
+        Apply filtering options to the video list.
+        
+        Args:
+            videos: List of videos to filter
+            options: Filtering options
+            
+        Returns:
+            Filtered list of videos
+        """
+        filtered = videos
+        
+        # Filter by duration
+        if options.min_video_duration or options.max_video_duration:
+            filtered = [
+                v for v in filtered 
+                if v.duration and (
+                    (not options.min_video_duration or v.duration >= options.min_video_duration) and
+                    (not options.max_video_duration or v.duration <= options.max_video_duration)
+                )
+            ]
+        
+        # Filter by date
+        if options.date_from or options.date_to:
+            filtered = [
+                v for v in filtered
+                if v.upload_date and (
+                    (not options.date_from or v.upload_date >= options.date_from) and
+                    (not options.date_to or v.upload_date <= options.date_to)
+                )
+            ]
+        
+        return filtered
+    
+    def _report_progress(self, current: int, total: int, message: str):
+        """
+        Report progress to the callback function.
+        
+        Args:
+            current: Current progress value
+            total: Total progress value
+            message: Progress message
+        """
+        if self.progress_callback:
+            try:
+                self.progress_callback(current, total, message)
+            except Exception as e:
+                self.logger.warning(f"Progress callback error: {e}")
+    
+    def _sanitize_folder_name(self, name: str, max_length: int = 50) -> str:
+        """
+        Sanitize a string to be safe for use as a folder name.
+        
+        Args:
+            name: The original name
+            max_length: Maximum length of the sanitized name
+            
+        Returns:
+            Sanitized folder name
+        """
+        if not name:
+            return "Unknown_Video"
+        
+        # Replace invalid characters with underscores
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            name = name.replace(char, '_')
+        
+        # Replace multiple spaces with single spaces
+        name = ' '.join(name.split())
+        
+        # Truncate if too long
+        if len(name) > max_length:
+            name = name[:max_length].rstrip()
+        
+        # Ensure it's not empty after sanitization
+        if not name.strip():
+            return "Unknown_Video"
+        
+        return name.strip()
+
+
+# Convenience functions for easy usage
+def process_source_batch(source_url: str, options: Optional[BatchOptions] = None, 
+                        progress_callback: Optional[Callable] = None,
+                        cancel_token: Optional[Event] = None) -> BatchResult:
+    """
+    Convenience function to process a source in batch mode.
+    
+    Args:
+        source_url: URL of the channel or playlist
+        options: Processing options (uses defaults if None)
+        progress_callback: Function to call for progress updates
+        cancel_token: Event object to check for cancellation
+        
+    Returns:
+        BatchResult with processing statistics
+    """
+    if options is None:
+        options = BatchOptions()
+    
+    processor = BatchProcessor(progress_callback, cancel_token)
+    return processor.process_source(source_url, options)
