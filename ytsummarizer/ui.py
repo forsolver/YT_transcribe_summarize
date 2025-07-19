@@ -50,13 +50,10 @@ class YouTubeSummarizerUI(QMainWindow):
         self.summarize_button.clicked.connect(self.run_summarize)
         buttons_layout.addWidget(self.summarize_button)
 
-        self.extract_tricks_button = QPushButton("Извлечь трюки")
-        self.extract_tricks_button.clicked.connect(self.run_extract_tricks)
-        buttons_layout.addWidget(self.extract_tricks_button)
-
-        self.download_tricks_button = QPushButton("Скачать видео трюков")
-        self.download_tricks_button.clicked.connect(self.run_download_tricks)
-        buttons_layout.addWidget(self.download_tricks_button)
+        # Объединенная кнопка для извлечения и скачивания трюков
+        self.extract_and_download_button = QPushButton("Извлечь и скачать трюки")
+        self.extract_and_download_button.clicked.connect(self.run_extract_and_download_tricks)
+        buttons_layout.addWidget(self.extract_and_download_button)
 
         # Batch settings button
         self.batch_settings_button = QPushButton("Настройки пакетной обработки")
@@ -141,8 +138,8 @@ class YouTubeSummarizerUI(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка при создании саммари", str(e))
 
-    def run_extract_tricks(self):
-        """Enhanced trick extraction that supports both single videos and batch processing."""
+    def run_extract_and_download_tricks(self):
+        """Enhanced trick extraction and download that supports both single videos and batch processing."""
         url = self.url_input.text().strip()
         if not url:
             QMessageBox.warning(self, "Предупреждение", "Пожалуйста, введите URL.")
@@ -154,47 +151,18 @@ class YouTubeSummarizerUI(QMainWindow):
         logger.info(f"Detected URL type: {url_type}")
         
         if url_type == URLType.SINGLE_VIDEO:
-            logger.info("Using single video processing")
-            # Use existing single video processing
-            self._run_single_video_extract_tricks(url)
+            logger.info("Using single video processing with download")
+            # Use single video processing that downloads tricks
+            self.run_download_tricks()
         elif url_type in [URLType.CHANNEL, URLType.PLAYLIST]:
-            logger.info("Using batch processing")
-            # Use batch processing
+            logger.info("Using batch processing with download")
+            # Use batch processing (already downloads tricks)
             self.run_batch_processing(url)
         else:
             logger.error(f"Unsupported URL type: {url_type}")
             QMessageBox.critical(self, "Ошибка", "Неподдерживаемый тип URL.")
     
-    def _run_single_video_extract_tricks(self, url):
-        """Original single video trick extraction logic."""
-        if not self._fetch_transcript_data(url):
-            return
 
-        if not self.processed_transcript_fragments:
-            QMessageBox.critical(self, "Ошибка", "Нет данных транскрипта для извлечения трюков.")
-            return
-
-        try:
-            # Используем параметры по умолчанию для extract_trick_segments
-            # Их можно будет вынести в UI, если потребуется настройка
-            trick_segments = vp.extract_trick_segments(self.processed_transcript_fragments)
-
-            if not trick_segments:
-                self.output_text_area.setPlainText(f"Трюки не найдены в видео \"{self.video_info.get('title', 'Без названия')}\".")
-                return
-
-            result_lines = [f"Найденные трюковые сегменты для видео \"{self.video_info.get('title', 'Без названия')}\":\n"]
-            for seg in trick_segments:
-                start_td = self.seconds_to_timecode(seg['start'])
-                end_td = self.seconds_to_timecode(seg['end'])
-                duration_td = self.seconds_to_timecode(seg['duration'])
-                result_lines.append(f"- Начало: {start_td}, Конец: {end_td} (Длительность: {duration_td})")
-
-            self.output_text_area.setPlainText("\n".join(result_lines))
-
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка при извлечении трюков", str(e))
-            logging.error(f"Ошибка при извлечении трюков: {e}", exc_info=True)
 
     def run_download_tricks(self):
         url = self.url_input.text().strip()
@@ -390,8 +358,7 @@ class YouTubeSummarizerUI(QMainWindow):
     def set_buttons_enabled(self, enabled):
         """Enable or disable all buttons."""
         self.summarize_button.setEnabled(enabled)
-        self.extract_tricks_button.setEnabled(enabled)
-        self.download_tricks_button.setEnabled(enabled)
+        self.extract_and_download_button.setEnabled(enabled)
         self.batch_settings_button.setEnabled(enabled)
 
 
