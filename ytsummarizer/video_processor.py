@@ -1,7 +1,11 @@
 import re
 import os
 import subprocess
+import logging
 from yt_dlp import YoutubeDL
+
+# Настройка логирования
+logger = logging.getLogger("ytsummarizer.video_processor")
 
 DEFAULT_MIN_SILENCE_DURATION = 2.0  # Минимальная длительность "тихого" сегмента в секундах, чтобы считать его трюком
 DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT = 3 # Максимальное количество слов в сегменте, чтобы он считался "тихим"
@@ -198,10 +202,10 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
         print(f"Скачан файл: {os.path.basename(video_file)}")
             
         # Извлекаем сегменты с помощью ffmpeg
-        print(f"[DEBUG] Starting extraction of {len(valid_segments)} video segments")
+        logger.debug(f"Starting extraction of {len(valid_segments)} video segments")
         segment_files = []
         for i, segment in enumerate(valid_segments):
-            print(f"[DEBUG] Processing segment {i+1}/{len(valid_segments)}")
+            logger.debug(f"Processing segment {i+1}/{len(valid_segments)}")
             # Корректируем время начала, чтобы избежать черного экрана в начале
             # Вычитаем 2 секунды, но не уходим в отрицательное время
             start_time = max(0, segment['start'] - 2.0)
@@ -249,44 +253,44 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
             
             # Сначала пробуем копирование (быстрее)
             try:
-                print(f"[DEBUG] Trying copy mode for segment {i+1}...")
+                logger.debug(f"Trying copy mode for segment {i+1}...")
                 result = subprocess.run(cmd_copy, check=True, capture_output=True, text=True)
                 
                 # Проверяем, что файл создался и не пустой
                 if os.path.exists(segment_path) and os.path.getsize(segment_path) > 1000:
                     segment_files.append(segment_path)
-                    print(f"Создан сегмент {i+1} (copy mode): {segment_filename}")
+                    logger.info(f"Создан сегмент {i+1} (copy mode): {segment_filename}")
                     success = True
                 else:
-                    print(f"[DEBUG] Copy mode created empty/small file for segment {i+1}")
+                    logger.debug(f"Copy mode created empty/small file for segment {i+1}")
                     if os.path.exists(segment_path):
                         os.remove(segment_path)
                     
             except subprocess.CalledProcessError as e:
-                print(f"[DEBUG] Copy mode failed for segment {i+1}: {e.stderr}")
+                logger.debug(f"Copy mode failed for segment {i+1}: {e.stderr}")
             
             # Если копирование не сработало, пробуем перекодирование
             if not success:
                 try:
-                    print(f"[DEBUG] Trying re-encode mode for segment {i+1}...")
+                    logger.debug(f"Trying re-encode mode for segment {i+1}...")
                     result = subprocess.run(cmd_reencode, check=True, capture_output=True, text=True)
                     
                     if os.path.exists(segment_path) and os.path.getsize(segment_path) > 1000:
                         segment_files.append(segment_path)
-                        print(f"Создан сегмент {i+1} (re-encode mode): {segment_filename}")
+                        logger.info(f"Создан сегмент {i+1} (re-encode mode): {segment_filename}")
                         success = True
                     else:
-                        print(f"[DEBUG] Re-encode mode created empty/small file for segment {i+1}")
+                        logger.debug(f"Re-encode mode created empty/small file for segment {i+1}")
                         
                 except subprocess.CalledProcessError as e:
-                    print(f"Ошибка при извлечении сегмента {i+1} (re-encode): {e.stderr}")
+                    logger.error(f"Ошибка при извлечении сегмента {i+1} (re-encode): {e.stderr}")
             
             if not success:
-                print(f"[ERROR] Failed to create segment {i+1} with both copy and re-encode modes")
+                logger.error(f"Failed to create segment {i+1} with both copy and re-encode modes")
                 continue
         
         # Удаляем исходное видео после извлечения сегментов
-        print(f"[DEBUG] Attempting to remove source video file: {os.path.basename(video_file)}")
+        logger.debug(f"Attempting to remove source video file: {os.path.basename(video_file)}")
         try:
             # На Windows файл может быть заблокирован, добавляем небольшую задержку
             import time
@@ -294,14 +298,14 @@ def extract_video_segments(video_id: str, segments: list[dict], output_dir: str 
             
             if os.path.exists(video_file):
                 os.remove(video_file)
-                print(f"[DEBUG] Successfully removed source video file")
+                logger.debug(f"Successfully removed source video file")
             else:
-                print(f"[DEBUG] Source video file already removed or doesn't exist")
+                logger.debug(f"Source video file already removed or doesn't exist")
         except OSError as e:
-            print(f"[DEBUG] Could not remove source video file: {e} (this is not critical)")
+            logger.warning(f"Could not remove source video file: {e} (this is not critical)")
             pass
         
-        print(f"[DEBUG] extract_video_segments completed successfully, returning {len(segment_files)} files")
+        logger.debug(f"extract_video_segments completed successfully, returning {len(segment_files)} files")
         return segment_files
 
     except Exception as e:

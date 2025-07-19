@@ -13,6 +13,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from threading import Event
 
+# Настройка логирования
+logger = logging.getLogger("ytsummarizer.batch_processor")
+
 from .transcripts import (
     get_source_metadata, extract_video_list, get_transcript, 
     SourceInfo, VideoInfo
@@ -106,15 +109,15 @@ class BatchProcessor:
         Returns:
             BatchResult with processing statistics and results
         """
-        print(f"[DEBUG] Starting process_source with URL: {source_url}")
+        logger.debug(f"Starting process_source with URL: {source_url}")
         start_time = time.time()
         
         # Get source metadata
-        print(f"[DEBUG] Getting source metadata...")
+        logger.debug(f"Getting source metadata...")
         try:
             source_info = get_source_metadata(source_url)
             if not source_info:
-                print(f"[DEBUG] Failed to get source metadata")
+                logger.debug(f"Failed to get source metadata")
                 result = BatchResult(
                     source_info=SourceInfo("Unknown", URLType.INVALID, source_url, 0),
                     processing_time=time.time() - start_time
@@ -127,9 +130,9 @@ class BatchProcessor:
                 ))
                 return result
             else:
-                print(f"[DEBUG] Got source metadata: {source_info.name}, {source_info.total_videos} videos")
+                logger.debug(f"Got source metadata: {source_info.name}, {source_info.total_videos} videos")
         except Exception as e:
-            print(f"[DEBUG] Exception getting source metadata: {e}")
+            logger.exception(f"Exception getting source metadata: {e}")
             import traceback
             traceback.print_exc()
             result = BatchResult(
@@ -145,11 +148,11 @@ class BatchProcessor:
             return result
         
         # Extract video list
-        print(f"[DEBUG] Extracting video list (limit: {options.max_videos})...")
+        logger.debug(f"Extracting video list (limit: {options.max_videos})...")
         try:
             videos = extract_video_list(source_url, limit=options.max_videos)
             if not videos:
-                print(f"[DEBUG] No videos found in source")
+                logger.debug(f"No videos found in source")
                 result = BatchResult(
                     source_info=source_info,
                     processing_time=time.time() - start_time
@@ -162,13 +165,13 @@ class BatchProcessor:
                 ))
                 return result
             else:
-                print(f"[DEBUG] Extracted {len(videos)} videos from source")
+                logger.debug(f"Extracted {len(videos)} videos from source")
                 for i, video in enumerate(videos[:3]):  # Show first 3 videos
-                    print(f"[DEBUG]   {i+1}. {video.title} ({video.video_id})")
+                    logger.debug(f"  {i+1}. {video.title} ({video.video_id})")
                 if len(videos) > 3:
-                    print(f"[DEBUG]   ... and {len(videos) - 3} more videos")
+                    logger.debug(f"  ... and {len(videos) - 3} more videos")
         except Exception as e:
-            print(f"[DEBUG] Exception extracting video list: {e}")
+            logger.exception(f"Exception extracting video list: {e}")
             import traceback
             traceback.print_exc()
             result = BatchResult(
@@ -184,20 +187,20 @@ class BatchProcessor:
             return result
         
         # Apply filters
-        print(f"[DEBUG] Applying filters...")
+        logger.debug(f"Applying filters...")
         filtered_videos = self._apply_filters(videos, options)
-        print(f"[DEBUG] After filtering: {len(filtered_videos)} videos remain")
+        logger.debug(f"After filtering: {len(filtered_videos)} videos remain")
         
         # Process videos
-        print(f"[DEBUG] Starting video processing...")
+        logger.debug(f"Starting video processing...")
         try:
             result = self.process_video_list(filtered_videos, source_info, options)
             result.processing_time = time.time() - start_time
             result.end_time = datetime.now()
-            print(f"[DEBUG] process_source completed successfully")
+            logger.debug(f"process_source completed successfully")
             return result
         except Exception as e:
-            print(f"[DEBUG] Exception in process_video_list: {e}")
+            logger.exception(f"Exception in process_video_list: {e}")
             import traceback
             traceback.print_exc()
             result = BatchResult(
@@ -230,15 +233,15 @@ class BatchProcessor:
             total_videos=len(videos)
         )
         
-        print(f"[DEBUG] Starting batch processing of {len(videos)} videos from {source_info.name}")
+        logger.debug(f"Starting batch processing of {len(videos)} videos from {source_info.name}")
         self._report_progress(0, len(videos), "Starting batch processing...")
         
         for i, video in enumerate(videos):
-            print(f"[DEBUG] Processing video {i+1}/{len(videos)}: {video.title}")
+            logger.debug(f"Processing video {i+1}/{len(videos)}: {video.title}")
             
             # Check for cancellation
             if self.cancel_token and self.cancel_token.is_set():
-                print(f"[DEBUG] Batch processing cancelled at video {i+1}")
+                logger.debug(f"Batch processing cancelled at video {i+1}")
                 result.cancelled = True
                 self._report_progress(i, len(videos), "Processing cancelled")
                 break
@@ -255,14 +258,14 @@ class BatchProcessor:
                     result.successful_extractions += 1
                     result.total_tricks += video_result.tricks_found
                     result.total_segments += len(video_result.segments_extracted)
-                    print(f"[DEBUG] Video {i+1} processed successfully: {video_result.tricks_found} tricks, {len(video_result.segments_extracted)} segments")
+                    logger.debug(f"Video {i+1} processed successfully: {video_result.tricks_found} tricks, {len(video_result.segments_extracted)} segments")
                 else:
                     if video_result.error:
                         result.errors.append(video_result.error)
-                        print(f"[DEBUG] Video {i+1} failed: {video_result.error.error_type} - {video_result.error.error_message}")
+                        logger.debug(f"Video {i+1} failed: {video_result.error.error_type} - {video_result.error.error_message}")
                 
             except Exception as e:
-                print(f"[DEBUG] Critical error processing video {i+1}: {str(e)}")
+                logger.exception(f"Critical error processing video {i+1}: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 error = ProcessingError(
@@ -276,14 +279,14 @@ class BatchProcessor:
             
             # Small delay to prevent overwhelming the system
             time.sleep(0.5)
-            print(f"[DEBUG] Completed video {i+1}/{len(videos)}, continuing to next...")
+            logger.debug(f"Completed video {i+1}/{len(videos)}, continuing to next...")
         
         # Final progress report
         if not result.cancelled:
-            print(f"[DEBUG] Batch processing completed successfully")
+            logger.debug(f"Batch processing completed successfully")
             self._report_progress(len(videos), len(videos), "Batch processing complete")
         
-        print(f"[DEBUG] Final stats: {result.processed_videos} processed, {result.successful_extractions} successful, {len(result.errors)} errors")
+        logger.debug(f"Final stats: {result.processed_videos} processed, {result.successful_extractions} successful, {len(result.errors)} errors")
         
         return result
     
@@ -330,25 +333,25 @@ class BatchProcessor:
         start_time = time.time()
         result = VideoProcessingResult(video_info=video_info)
         
-        print(f"[DEBUG] Starting processing video: {video_info.title} (ID: {video_info.video_id})")
+        logger.debug(f"Starting processing video: {video_info.title} (ID: {video_info.video_id})")
         
         try:
             # Check if we should skip existing
             if options.skip_existing:
                 video_folder = self.create_folder_structure(source_info, video_info, options.output_dir)
                 if os.path.exists(video_folder) and os.listdir(video_folder):
-                    print(f"[DEBUG] Skipping existing video: {video_info.title}")
+                    logger.debug(f"Skipping existing video: {video_info.title}")
                     result.success = True
                     result.processing_time = time.time() - start_time
                     return result
             
-            print(f"[DEBUG] Getting transcript for video: {video_info.video_id}")
+            logger.debug(f"Getting transcript for video: {video_info.video_id}")
             # Get transcript
             try:
                 plain_text, fragments, video_info_detailed = get_transcript(video_info.video_id)
-                print(f"[DEBUG] Successfully got transcript with {len(fragments)} fragments")
+                logger.debug(f"Successfully got transcript with {len(fragments)} fragments")
             except Exception as e:
-                print(f"[DEBUG] Failed to get transcript: {str(e)}")
+                logger.error(f"Failed to get transcript: {str(e)}")
                 result.error = ProcessingError(
                     video_id=video_info.video_id,
                     video_title=video_info.title,
@@ -358,21 +361,21 @@ class BatchProcessor:
                 result.processing_time = time.time() - start_time
                 return result
             
-            print(f"[DEBUG] Extracting trick segments...")
+            logger.debug(f"Extracting trick segments...")
             # Extract trick segments
             try:
                 trick_segments = extract_trick_segments(fragments)
                 result.tricks_found = len(trick_segments)
-                print(f"[DEBUG] Found {len(trick_segments)} trick segments")
+                logger.debug(f"Found {len(trick_segments)} trick segments")
                 
                 if trick_segments:
                     # Create folder structure
                     video_folder = self.create_folder_structure(source_info, video_info, options.output_dir)
-                    print(f"[DEBUG] Created folder: {video_folder}")
+                    logger.debug(f"Created folder: {video_folder}")
                     
                     # Extract video segments
-                    print(f"[DEBUG] Starting video segment extraction...")
-                    print(f"[DEBUG] Calling extract_video_segments with {len(trick_segments)} segments")
+                    logger.debug(f"Starting video segment extraction...")
+                    logger.debug(f"Calling extract_video_segments with {len(trick_segments)} segments")
                     
                     extracted_files = extract_video_segments(
                         video_info.video_id, 
@@ -381,17 +384,17 @@ class BatchProcessor:
                         video_info=video_info_detailed
                     )
                     
-                    print(f"[DEBUG] extract_video_segments returned successfully")
+                    logger.debug(f"extract_video_segments returned successfully")
                     result.segments_extracted = extracted_files
-                    print(f"[DEBUG] Successfully extracted {len(extracted_files)} video segments")
+                    logger.debug(f"Successfully extracted {len(extracted_files)} video segments")
                 else:
-                    print(f"[DEBUG] No trick segments found for video: {video_info.title}")
+                    logger.debug(f"No trick segments found for video: {video_info.title}")
                 
                 result.success = True
-                print(f"[DEBUG] Successfully completed processing video: {video_info.title}")
+                logger.debug(f"Successfully completed processing video: {video_info.title}")
                 
             except Exception as e:
-                print(f"[DEBUG] Error during trick extraction: {str(e)}")
+                logger.exception(f"Error during trick extraction: {str(e)}")
                 import traceback
                 traceback.print_exc()
                 result.error = ProcessingError(
@@ -402,7 +405,7 @@ class BatchProcessor:
                 )
         
         except Exception as e:
-            print(f"[DEBUG] Unexpected error processing video {video_info.title}: {str(e)}")
+            logger.exception(f"Unexpected error processing video {video_info.title}: {str(e)}")
             import traceback
             traceback.print_exc()
             result.error = ProcessingError(
@@ -413,7 +416,7 @@ class BatchProcessor:
             )
         
         result.processing_time = time.time() - start_time
-        print(f"[DEBUG] Finished processing video: {video_info.title} (Success: {result.success}, Time: {result.processing_time:.1f}s)")
+        logger.debug(f"Finished processing video: {video_info.title} (Success: {result.success}, Time: {result.processing_time:.1f}s)")
         return result
     
     def _apply_filters(self, videos: List[VideoInfo], options: BatchOptions) -> List[VideoInfo]:

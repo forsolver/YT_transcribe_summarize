@@ -2,6 +2,7 @@ import os
 import json
 import time
 import requests
+import logging
 from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi
 from yt_dlp import YoutubeDL
@@ -10,6 +11,16 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 
 from .url_detector import URLDetector, URLType
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # Вывод в консоль
+    ]
+)
+logger = logging.getLogger("ytsummarizer.transcripts")
 
 __all__ = [
     "get_transcript",
