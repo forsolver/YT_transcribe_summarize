@@ -9,6 +9,9 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 
+# Создаем логгер для UI
+logger = logging.getLogger("ytsummarizer.ui")
+
 from . import transcripts as tr
 from . import summarizer as sz
 from . import video_processor as vp
@@ -146,15 +149,20 @@ class YouTubeSummarizerUI(QMainWindow):
             return
         
         # Detect URL type
+        logger.info(f"Processing URL: {url}")
         url_type = self.url_detector.detect_url_type(url)
+        logger.info(f"Detected URL type: {url_type}")
         
         if url_type == URLType.SINGLE_VIDEO:
+            logger.info("Using single video processing")
             # Use existing single video processing
             self._run_single_video_extract_tricks(url)
         elif url_type in [URLType.CHANNEL, URLType.PLAYLIST]:
+            logger.info("Using batch processing")
             # Use batch processing
             self.run_batch_processing(url)
         else:
+            logger.error(f"Unsupported URL type: {url_type}")
             QMessageBox.critical(self, "Ошибка", "Неподдерживаемый тип URL.")
     
     def _run_single_video_extract_tricks(self, url):
