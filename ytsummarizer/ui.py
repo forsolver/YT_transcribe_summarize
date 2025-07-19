@@ -329,7 +329,10 @@ class YouTubeSummarizerUI(QMainWindow):
     
     def run_batch_processing(self, source_url):
         """Run batch processing for channels and playlists."""
+        logger.info(f"Starting batch processing for URL: {source_url}")
+        
         # Show progress widgets
+        logger.debug("Showing progress widgets")
         self.progress_widget.show()
         self.cancel_button.show()
         
@@ -341,13 +344,18 @@ class YouTubeSummarizerUI(QMainWindow):
         
         # Get batch options (for now use defaults, later from settings dialog)
         options = BatchOptions(max_videos=50)
+        logger.info(f"Batch options: max_videos={options.max_videos}")
         
         # Start batch processing in a separate thread
+        logger.debug("Creating BatchProcessingThread")
         self.batch_thread = BatchProcessingThread(source_url, options, self.cancel_token)
         self.batch_thread.progress_update.connect(self.update_progress)
         self.batch_thread.finished_signal.connect(self.on_batch_finished)
         self.batch_thread.error_signal.connect(self.on_batch_error)
+        
+        logger.debug("Starting batch processing thread")
         self.batch_thread.start()
+        logger.info("Batch processing thread started successfully")
     
     def on_batch_finished(self, result):
         """Handle batch processing completion."""
@@ -420,14 +428,19 @@ class BatchProcessingThread(QThread):
     
     def run(self):
         """Run the batch processing operation."""
+        logger.info(f"BatchProcessingThread.run() started for URL: {self.source_url}")
         try:
+            logger.debug("Creating BatchProcessor instance")
             processor = BatchProcessor(
                 progress_callback=self.emit_progress,
                 cancel_token=self.cancel_token
             )
+            logger.debug("Calling processor.process_source()")
             result = processor.process_source(self.source_url, self.options)
+            logger.info(f"BatchProcessor completed successfully, emitting result")
             self.finished_signal.emit(result)
         except Exception as e:
+            logger.exception(f"BatchProcessingThread error: {e}")
             self.error_signal.emit(str(e))
     
     def emit_progress(self, current, total, message):
