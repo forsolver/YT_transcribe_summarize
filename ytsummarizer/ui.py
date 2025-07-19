@@ -308,25 +308,7 @@ class YouTubeSummarizerUI(QMainWindow):
         self.status_label.setText(message)
         QApplication.processEvents()
     
-    def run_extract_tricks_enhanced(self):
-        """Enhanced trick extraction that supports both single videos and batch processing."""
-        url = self.url_input.text().strip()
-        if not url:
-            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, введите URL.")
-            return
-        
-        # Detect URL type
-        url_type = self.url_detector.detect_url_type(url)
-        
-        if url_type == URLType.SINGLE_VIDEO:
-            # Use existing single video processing
-            self.run_extract_tricks()
-        elif url_type in [URLType.CHANNEL, URLType.PLAYLIST]:
-            # Use batch processing
-            self.run_batch_processing(url)
-        else:
-            QMessageBox.critical(self, "Ошибка", "Неподдерживаемый тип URL.")
-    
+
     def run_batch_processing(self, source_url):
         """Run batch processing for channels and playlists."""
         logger.info(f"Starting batch processing for URL: {source_url}")
