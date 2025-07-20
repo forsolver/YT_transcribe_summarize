@@ -23,5 +23,11 @@ ENV/
 cookies.txt
 tricks/
 
+# Claude v3.0 additions
+.state/
+cache/
+test_*.py
+*_test.py
+
 # YoYo AI version control directory
 .yoyo/
