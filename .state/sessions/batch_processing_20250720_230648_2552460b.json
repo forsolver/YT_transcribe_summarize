@@ -1,0 +1,72 @@
+{
+  "session_id": "batch_processing_20250720_230648_2552460b",
+  "operation_type": "batch_processing",
+  "start_time": "2025-07-20T23:06:48.467491",
+  "total_items": 3,
+  "completed_items": [
+    {
+      "video_id": "dQw4w9WgXcQ",
+      "url": "https://youtu.be/dQw4w9WgXcQ",
+      "started_at": null,
+      "completed_at": "2025-07-20T23:06:48.471110",
+      "failed_at": null,
+      "error": null,
+      "error_category": null,
+      "retry_count": 0,
+      "tricks_found": 2,
+      "output_files": [
+        "rick_roll_trick1.mp4",
+        "rick_roll_trick2.mp4"
+      ],
+      "progress": "pending"
+    }
+  ],
+  "failed_items": [
+    {
+      "video_id": "invalid123",
+      "url": "https://youtu.be/invalid123",
+      "started_at": null,
+      "completed_at": null,
+      "failed_at": "2025-07-20T23:06:48.471298",
+      "error": "Video not available",
+      "error_category": "video_error",
+      "retry_count": 2,
+      "tricks_found": 0,
+      "output_files": [],
+      "progress": "pending"
+    }
+  ],
+  "current_item": {
+    "video_id": "another456",
+    "url": "https://youtu.be/another456",
+    "started_at": "2025-07-20T23:06:48.471305",
+    "completed_at": null,
+    "failed_at": null,
+    "error": null,
+    "error_category": null,
+    "retry_count": 0,
+    "tricks_found": 0,
+    "output_files": [],
+    "progress": "downloading_video"
+  },
+  "checkpoint_data": {
+    "items": [
+      "https://youtu.be/dQw4w9WgXcQ",
+      "https://youtu.be/invalid123",
+      "https://youtu.be/another456"
+    ],
+    "processing_options": {},
+    "last_checkpoint": "2025-07-20T23:06:48.467499",
+    "last_milestone": "video_download_started",
+    "processing_stats": {
+      "total_tricks_found": 2,
+      "total_processing_time": 45.6,
+      "average_tricks_per_video": 2.0
+    }
+  },
+  "resumable": true,
+  "status": "running",
+  "last_checkpoint": "2025-07-20T23:06:48.485873",
+  "source_url": "https://youtube.com/playlist?list=test",
+  "source_name": "Test Batch Processing"
+}

@@ -7,10 +7,13 @@ from urllib.parse import urlparse, parse_qs
 from youtube_transcript_api import YouTubeTranscriptApi
 from yt_dlp import YoutubeDL
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Callable
 from dataclasses import dataclass
 
 from .url_detector import URLDetector, URLType
+from .youtube_blocking_detector import YouTubeBlockingDetector
+from .error_handler import ErrorHandler
+from .retry_logic import RetryManager, RetryConfig
 
 # Настройка логирования
 logging.basicConfig(
@@ -42,6 +45,85 @@ os.makedirs(TRANSCRIPT_CACHE_DIR, exist_ok=True)
 
 # Время жизни кэша в секундах (7 дней)
 CACHE_TTL = 7 * 24 * 60 * 60
+
+# Global instances for blocking detection and error handling
+_blocking_detector = None
+_error_handler = None
+_retry_manager = None
+
+def get_blocking_detector() -> YouTubeBlockingDetector:
+    """Get or create global blocking detector instance."""
+    global _blocking_detector
+    if _blocking_detector is None:
+        _blocking_detector = YouTubeBlockingDetector()
+    return _blocking_detector
+
+def get_error_handler() -> ErrorHandler:
+    """Get or create global error handler instance."""
+    global _error_handler
+    if _error_handler is None:
+        _error_handler = ErrorHandler(get_blocking_detector())
+    return _error_handler
+
+def get_retry_manager() -> RetryManager:
+    """Get or create global retry manager instance."""
+    global _retry_manager
+    if _retry_manager is None:
+        config = RetryConfig(
+            max_retries=5,
+            base_delay=2.0,
+            max_delay=600.0,  # 10 minutes for YouTube operations
+            exponential_base=2.0,
+            jitter=True
+        )
+        _retry_manager = RetryManager(get_error_handler(), config)
+    return _retry_manager
+
+def youtube_api_call(func: Callable, operation_name: str, video_id: Optional[str] = None, **kwargs):
+    """
+    Wrapper for YouTube API calls with blocking detection and error handling.
+    
+    Args:
+        func: Function to call
+        operation_name: Name of the operation for logging
+        video_id: Video ID if applicable
+        **kwargs: Arguments to pass to the function
+        
+    Returns:
+        Function result
+        
+    Raises:
+        Exception: If operation fails after retries
+    """
+    context = {
+        'operation': operation_name,
+        'video_id': video_id,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    def wrapped_call():
+        try:
+            result = func(**kwargs)
+            # Record success
+            get_blocking_detector().record_success(operation_name, video_id)
+            return result
+        except Exception as e:
+            # Let error handler and blocking detector process the error
+            error_result = get_error_handler().handle_error(e, context)
+            
+            # If there's a blocking alert, log it
+            if error_result.blocking_alert:
+                logger.warning(f"YouTube blocking detected: {error_result.blocking_alert.message}")
+            
+            # Re-raise the exception to be handled by retry logic
+            raise
+    
+    # Use retry manager for the operation
+    return get_retry_manager().retry_with_backoff(
+        wrapped_call,
+        operation_id=f"{operation_name}_{video_id or 'unknown'}",
+        context=context
+    )
 
 
 @dataclass
@@ -76,12 +158,16 @@ def get_video_info(video_id: str):
         "quiet": True,
         "nocheckcertificate": True,
     }
-    try:
+    
+    def _get_info():
         with YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             return {"duration": info.get("duration"), "title": info.get("title")}
+    
+    try:
+        return youtube_api_call(_get_info, "get_video_info", video_id)
     except Exception as e:
-        # print(f"Error getting video info: {e}")
+        logger.error(f"Error getting video info for {video_id}: {e}")
         return {"duration": None, "title": None}
 
 def extract_video_id(url_or_id: str) -> str:
@@ -125,25 +211,21 @@ def clear_transcript_cache(video_id=None):
         return True
     return False
 
-def _get_transcript_with_retry(video_id: str, languages: list, cookies_param=None, max_retries=3):
+def _get_transcript_with_blocking_detection(video_id: str, languages: list, cookies_param=None):
     """
-    Получает транскрипт с повторными попытками при ошибке 429.
+    Получает транскрипт с интегрированным обнаружением блокировки.
     """
-    import random
-    
-    for attempt in range(max_retries):
+    def _get_transcript():
+        # Check if cookies parameter is supported
         try:
             return YouTubeTranscriptApi.get_transcript(video_id, languages=languages, cookies=cookies_param)
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "Too Many Requests" in error_str:
-                if attempt < max_retries - 1:
-                    # Экспоненциальная задержка с джиттером
-                    wait_time = (2 ** attempt) + random.uniform(0, 2)
-                    logger.warning(f"Получена ошибка 429, ждем {wait_time:.1f} секунд перед повторной попыткой...")
-                    time.sleep(wait_time)
-                    continue
+        except TypeError as e:
+            if "cookies" in str(e):
+                # Fallback to version without cookies parameter
+                return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
             raise
+    
+    return youtube_api_call(_get_transcript, "get_transcript", video_id)
 
 
 def get_transcript(url_or_id: str, lang_priority=("ru", "en"), use_cache=True):
@@ -187,7 +269,7 @@ def get_transcript(url_or_id: str, lang_priority=("ru", "en"), use_cache=True):
     # 1. youtube-transcript-api с приоритетами
     for lang in lang_priority:
         try:
-            transcript = _get_transcript_with_retry(video_id, [lang], cookies_param)
+            transcript = _get_transcript_with_blocking_detection(video_id, [lang], cookies_param)
             used_lang = lang
             break
         except Exception:
@@ -196,29 +278,41 @@ def get_transcript(url_or_id: str, lang_priority=("ru", "en"), use_cache=True):
     # 2. перебор всех доступных + переводимых
     if transcript is None:
         try:
-            # Добавляем задержку перед запросом списка транскриптов
-            time.sleep(1)
-            lst = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies_param)
+            def _list_transcripts():
+                try:
+                    return YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies_param)
+                except TypeError as e:
+                    if "cookies" in str(e):
+                        # Fallback to version without cookies parameter
+                        return YouTubeTranscriptApi.list_transcripts(video_id)
+                    raise
+            
+            lst = youtube_api_call(_list_transcripts, "list_transcripts", video_id)
+            
             for tr in lst:
                 try:
-                    transcript = tr.fetch()
+                    def _fetch_transcript():
+                        return tr.fetch()
+                    
+                    transcript = youtube_api_call(_fetch_transcript, "fetch_transcript", video_id)
                     used_lang = tr.language_code
                     if transcript:
                         break
-                except Exception as e:
-                    if "429" in str(e):
-                        time.sleep(2)  # Дополнительная задержка при 429
+                except Exception:
                     pass
+                
                 if tr.is_translatable:
                     try:
                         target_lang = "ru" if "ru" in lang_priority else lang_priority[0]
-                        transcript = tr.translate(target_lang).fetch()
+                        
+                        def _translate_transcript():
+                            return tr.translate(target_lang).fetch()
+                        
+                        transcript = youtube_api_call(_translate_transcript, "translate_transcript", video_id)
                         used_lang = target_lang
                         if transcript:
                             break
-                    except Exception as e:
-                        if "429" in str(e):
-                            time.sleep(2)  # Дополнительная задержка при 429
+                    except Exception:
                         pass
         except Exception:
             pass
@@ -289,9 +383,13 @@ def _get_transcript_via_ytdlp(video_id: str, lang_priorities):
         "quiet": True,
         "nocheckcertificate": True,
     }
-    try:
+    
+    def _extract_info():
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            return ydl.extract_info(url, download=False)
+    
+    try:
+        info = youtube_api_call(_extract_info, "ytdlp_extract_info", video_id)
     except Exception:
         return None, None
 
@@ -379,24 +477,27 @@ def get_channel_info(channel_url: str) -> Optional[SourceInfo]:
         "extract_flat": True,  # Don't extract individual video info
     }
     
-    try:
+    def _extract_channel_info():
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(channel_url, download=False)
-            
-            # Sanitize channel name for folder creation
-            channel_name = info.get("title", "Unknown Channel")
-            safe_name = _sanitize_folder_name(channel_name)
-            
-            return SourceInfo(
-                name=safe_name,
-                type=URLType.CHANNEL,
-                url=channel_url,
-                total_videos=len(info.get("entries", [])),
-                description=info.get("description"),
-                channel_id=info.get("channel_id") or info.get("id")
-            )
+            return ydl.extract_info(channel_url, download=False)
+    
+    try:
+        info = youtube_api_call(_extract_channel_info, "get_channel_info")
+        
+        # Sanitize channel name for folder creation
+        channel_name = info.get("title", "Unknown Channel")
+        safe_name = _sanitize_folder_name(channel_name)
+        
+        return SourceInfo(
+            name=safe_name,
+            type=URLType.CHANNEL,
+            url=channel_url,
+            total_videos=len(info.get("entries", [])),
+            description=info.get("description"),
+            channel_id=info.get("channel_id") or info.get("id")
+        )
     except Exception as e:
-        print(f"Error getting channel info: {e}")
+        logger.error(f"Error getting channel info: {e}")
         return None
 
 
@@ -421,24 +522,27 @@ def get_playlist_info(playlist_url: str) -> Optional[SourceInfo]:
         "extract_flat": True,  # Don't extract individual video info
     }
     
-    try:
+    def _extract_playlist_info():
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(playlist_url, download=False)
-            
-            # Sanitize playlist name for folder creation
-            playlist_name = info.get("title", "Unknown Playlist")
-            safe_name = _sanitize_folder_name(playlist_name)
-            
-            return SourceInfo(
-                name=safe_name,
-                type=URLType.PLAYLIST,
-                url=playlist_url,
-                total_videos=len(info.get("entries", [])),
-                description=info.get("description"),
-                playlist_id=info.get("id")
-            )
+            return ydl.extract_info(playlist_url, download=False)
+    
+    try:
+        info = youtube_api_call(_extract_playlist_info, "get_playlist_info")
+        
+        # Sanitize playlist name for folder creation
+        playlist_name = info.get("title", "Unknown Playlist")
+        safe_name = _sanitize_folder_name(playlist_name)
+        
+        return SourceInfo(
+            name=safe_name,
+            type=URLType.PLAYLIST,
+            url=playlist_url,
+            total_videos=len(info.get("entries", [])),
+            description=info.get("description"),
+            playlist_id=info.get("id")
+        )
     except Exception as e:
-        print(f"Error getting playlist info: {e}")
+        logger.error(f"Error getting playlist info: {e}")
         return None
 
 
@@ -471,50 +575,53 @@ def extract_video_list(source_url: str, limit: Optional[int] = None) -> List[Vid
     if limit:
         ydl_opts["playlistend"] = limit
     
-    try:
+    def _extract_video_list():
         with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(source_url, download=False)
+            return ydl.extract_info(source_url, download=False)
+    
+    try:
+        info = youtube_api_call(_extract_video_list, "extract_video_list")
+        
+        videos = []
+        entries = info.get("entries", [])
+        
+        for entry in entries:
+            if not entry:  # Skip None entries (unavailable videos)
+                continue
             
-            videos = []
-            entries = info.get("entries", [])
+            video_id = entry.get("id")
+            if not video_id:
+                continue
             
-            for entry in entries:
-                if not entry:  # Skip None entries (unavailable videos)
-                    continue
-                
-                video_id = entry.get("id")
-                if not video_id:
-                    continue
-                
-                # Check for age restrictions or login requirements
-                title = entry.get("title", "Unknown Title")
-                if _is_video_restricted(entry):
-                    continue
-                
-                # Parse upload date
-                upload_date = None
-                if entry.get("upload_date"):
-                    try:
-                        upload_date = datetime.strptime(entry["upload_date"], "%Y%m%d")
-                    except ValueError:
-                        pass
-                
-                video_info = VideoInfo(
-                    video_id=video_id,
-                    title=title,
-                    url=f"https://www.youtube.com/watch?v={video_id}",
-                    duration=entry.get("duration"),
-                    upload_date=upload_date,
-                    thumbnail_url=entry.get("thumbnail"),
-                    view_count=entry.get("view_count"),
-                    description=entry.get("description")
-                )
-                videos.append(video_info)
+            # Check for age restrictions or login requirements
+            title = entry.get("title", "Unknown Title")
+            if _is_video_restricted(entry):
+                continue
             
-            return videos
+            # Parse upload date
+            upload_date = None
+            if entry.get("upload_date"):
+                try:
+                    upload_date = datetime.strptime(entry["upload_date"], "%Y%m%d")
+                except ValueError:
+                    pass
             
+            video_info = VideoInfo(
+                video_id=video_id,
+                title=title,
+                url=f"https://www.youtube.com/watch?v={video_id}",
+                duration=entry.get("duration"),
+                upload_date=upload_date,
+                thumbnail_url=entry.get("thumbnail"),
+                view_count=entry.get("view_count"),
+                description=entry.get("description")
+            )
+            videos.append(video_info)
+        
+        return videos
+        
     except Exception as e:
-        print(f"Error extracting video list: {e}")
+        logger.error(f"Error extracting video list: {e}")
         return []
 
 
@@ -602,4 +709,49 @@ def _sanitize_folder_name(name: str, max_length: int = 50) -> str:
     if not name.strip():
         return "Unknown"
     
-    return name.strip() 
+    return name.strip()
+
+
+def get_youtube_blocking_status() -> Dict[str, Any]:
+    """
+    Get current YouTube blocking detection status.
+    
+    Returns:
+        Dictionary with blocking status information
+    """
+    return get_blocking_detector().get_current_status()
+
+
+def reset_blocking_detector():
+    """Reset the YouTube blocking detector state."""
+    get_blocking_detector().reset()
+
+
+def is_youtube_blocked() -> bool:
+    """
+    Check if YouTube is currently blocking requests.
+    
+    Returns:
+        True if likely blocked
+    """
+    return get_blocking_detector().is_likely_blocked()
+
+
+def should_pause_youtube_requests() -> bool:
+    """
+    Check if YouTube requests should be paused due to blocking.
+    
+    Returns:
+        True if requests should be paused
+    """
+    return get_blocking_detector().should_pause_requests()
+
+
+def get_recommended_wait_time() -> int:
+    """
+    Get recommended wait time before retrying YouTube requests.
+    
+    Returns:
+        Wait time in seconds
+    """
+    return get_blocking_detector().get_recommended_wait_time()

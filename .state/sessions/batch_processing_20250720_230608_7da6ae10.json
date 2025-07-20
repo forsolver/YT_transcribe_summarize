@@ -1,0 +1,74 @@
+{
+  "session_id": "batch_processing_20250720_230608_7da6ae10",
+  "operation_type": "batch_processing",
+  "start_time": "2025-07-20T23:06:08.329180",
+  "total_items": 5,
+  "completed_items": [
+    {
+      "video_id": "video1",
+      "url": "https://youtu.be/video1",
+      "started_at": null,
+      "completed_at": "2025-07-20T23:06:08.332013",
+      "failed_at": null,
+      "error": null,
+      "error_category": null,
+      "retry_count": 0,
+      "tricks_found": 3,
+      "output_files": [
+        "trick1.mp4",
+        "trick2.mp4",
+        "trick3.mp4"
+      ],
+      "progress": "pending"
+    },
+    {
+      "video_id": "video2",
+      "url": "https://youtu.be/video2",
+      "started_at": null,
+      "completed_at": "2025-07-20T23:06:08.332030",
+      "failed_at": null,
+      "error": null,
+      "error_category": null,
+      "retry_count": 0,
+      "tricks_found": 1,
+      "output_files": [
+        "trick4.mp4"
+      ],
+      "progress": "pending"
+    }
+  ],
+  "failed_items": [],
+  "current_item": {
+    "video_id": "video3",
+    "url": "https://youtu.be/video3",
+    "started_at": "2025-07-20T23:06:08.332037",
+    "completed_at": null,
+    "failed_at": null,
+    "error": null,
+    "error_category": null,
+    "retry_count": 0,
+    "tricks_found": 0,
+    "output_files": [],
+    "progress": "extracting_tricks"
+  },
+  "checkpoint_data": {
+    "items": [
+      "video1",
+      "video2",
+      "video3",
+      "video4",
+      "video5"
+    ],
+    "processing_options": {
+      "output_folder": "tricks",
+      "skip_existing": true
+    },
+    "last_checkpoint": "2025-07-20T23:06:08.329189",
+    "last_milestone": "video_processing"
+  },
+  "resumable": true,
+  "status": "paused",
+  "last_checkpoint": "2025-07-20T23:06:08.372979",
+  "source_url": "https://youtube.com/playlist?list=test",
+  "source_name": "Test Playlist"
+}

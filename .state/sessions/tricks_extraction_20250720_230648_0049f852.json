@@ -1,0 +1,38 @@
+{
+  "session_id": "tricks_extraction_20250720_230648_0049f852",
+  "operation_type": "tricks_extraction",
+  "start_time": "2025-07-20T23:06:48.441759",
+  "total_items": 2,
+  "completed_items": [],
+  "failed_items": [
+    {
+      "video_id": "video1",
+      "url": "https://youtu.be/video1",
+      "started_at": null,
+      "completed_at": null,
+      "failed_at": "2025-07-20T23:06:48.445852",
+      "error": "Rate limit exceeded",
+      "error_category": null,
+      "retry_count": 3,
+      "tricks_found": 0,
+      "output_files": [],
+      "progress": "pending"
+    }
+  ],
+  "current_item": null,
+  "checkpoint_data": {
+    "items": [
+      "video1",
+      "video2"
+    ],
+    "processing_options": {
+      "track_errors": true
+    },
+    "last_checkpoint": "2025-07-20T23:06:48.441787"
+  },
+  "resumable": true,
+  "status": "running",
+  "last_checkpoint": "2025-07-20T23:06:48.453751",
+  "source_url": null,
+  "source_name": null
+}

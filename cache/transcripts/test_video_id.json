@@ -1,0 +1,21 @@
+{
+  "plain_text": "Hello World",
+  "fragments": [
+    {
+      "start": 0.0,
+      "text": "Hello",
+      "duration": 2.0
+    },
+    {
+      "start": 2.0,
+      "text": "World",
+      "duration": 8.0
+    }
+  ],
+  "video_info": {
+    "duration": 10,
+    "title": "Test Video"
+  },
+  "timestamp": 1753044920.0501528,
+  "language": "ru"
+}
