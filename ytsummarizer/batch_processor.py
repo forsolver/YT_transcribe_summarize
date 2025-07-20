@@ -152,16 +152,27 @@ class BatchProcessor:
         try:
             videos = extract_video_list(source_url, limit=options.max_videos)
             if not videos:
-                logger.debug(f"No videos found in source")
+                logger.warning(f"No videos found in source: {source_url}")
                 result = BatchResult(
                     source_info=source_info,
                     processing_time=time.time() - start_time
                 )
+                
+                # Provide more detailed error message
+                error_msg = (
+                    f"Не найдено доступных видео в источнике. "
+                    f"Возможные причины:\n"
+                    f"• Плейлист пустой или приватный\n"
+                    f"• Все видео имеют возрастные ограничения\n"
+                    f"• Видео требуют авторизации\n"
+                    f"• Проблемы с доступом к YouTube API"
+                )
+                
                 result.errors.append(ProcessingError(
                     video_id="",
                     video_title="",
                     error_type="VIDEO_LIST_ERROR",
-                    error_message="No videos found in source or failed to extract video list"
+                    error_message=error_msg
                 ))
                 return result
             else:

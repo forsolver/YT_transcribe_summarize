@@ -17,6 +17,8 @@ from . import summarizer as sz
 from . import video_processor as vp
 from .url_detector import URLDetector, URLType
 from .batch_processor import BatchProcessor, BatchOptions, BatchResult
+from .folder_selection_widget import FolderSelectionWidget
+from .settings_manager import SettingsManager
 
 
 class YouTubeSummarizerUI(QMainWindow):
@@ -50,6 +52,11 @@ class YouTubeSummarizerUI(QMainWindow):
         self.summarize_button.clicked.connect(self.run_summarize)
         buttons_layout.addWidget(self.summarize_button)
 
+        # Кнопка для проверки отдельного видео (только анализ, без скачивания)
+        self.check_video_button = QPushButton("Проверить видео")
+        self.check_video_button.clicked.connect(self.run_check_video)
+        buttons_layout.addWidget(self.check_video_button)
+
         # Объединенная кнопка для извлечения и скачивания трюков
         self.extract_and_download_button = QPushButton("Извлечь и скачать трюки")
         self.extract_and_download_button.clicked.connect(self.run_extract_and_download_tricks)
@@ -61,6 +68,11 @@ class YouTubeSummarizerUI(QMainWindow):
         buttons_layout.addWidget(self.batch_settings_button)
 
         layout.addLayout(buttons_layout)
+
+        # Folder selection widget
+        self.folder_selection_widget = FolderSelectionWidget()
+        self.folder_selection_widget.folder_changed.connect(self.on_folder_changed)
+        layout.addWidget(self.folder_selection_widget)
 
         # Progress indicators (initially hidden)
         self.progress_widget = self.create_progress_widget()
@@ -96,6 +108,15 @@ class YouTubeSummarizerUI(QMainWindow):
         font = self.output_text_area.font()
         font.setPointSize(size)
         self.output_text_area.setFont(font)
+    
+    def get_output_folder(self) -> str:
+        """Возвращает выбранную папку для сохранения файлов"""
+        return self.folder_selection_widget.get_selected_folder()
+    
+    def on_folder_changed(self, new_folder: str):
+        """Обработчик изменения папки сохранения"""
+        logger.info(f"Папка сохранения изменена на: {new_folder}")
+        self.output_text_area.append(f"📁 Папка сохранения изменена на: {new_folder}")
 
     def _fetch_transcript_data(self, video_id_or_url: str) -> bool:
         """
@@ -117,8 +138,53 @@ class YouTubeSummarizerUI(QMainWindow):
         except Exception as e:
             self.processed_transcript_fragments = None
             self.video_info = None
-            QMessageBox.critical(self, "Ошибка при получении транскрипта", str(e))
+            
+            # Предлагаем ручной ввод транскрипта
+            reply = QMessageBox.question(
+                self, 
+                "Ошибка при получении транскрипта",
+                f"Не удалось автоматически получить транскрипт:\n{str(e)}\n\n"
+                "Хотите ввести транскрипт вручную?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                return self._get_manual_transcript(video_id_or_url)
+            
             return False
+    
+    def _get_manual_transcript(self, video_url: str) -> bool:
+        """
+        Получить транскрипт вручную через диалог.
+        Возвращает True в случае успеха, False если пользователь отменил.
+        """
+        dialog = ManualTranscriptDialog(self, video_url)
+        if dialog.exec_() == QDialog.Accepted:
+            try:
+                fragments, video_info = dialog.get_transcript_data()
+                if fragments:
+                    self.processed_transcript_fragments = fragments
+                    self.video_info = video_info
+                    
+                    # Показываем информацию о загруженном транскрипте
+                    self.output_text_area.setPlainText(
+                        f"✅ Транскрипт загружен вручную!\n\n"
+                        f"📹 Видео: {video_info.get('title', 'Без названия')}\n"
+                        f"📝 Фрагментов: {len(fragments)}\n"
+                        f"⏱️ Примерная длительность: {self.seconds_to_timecode(video_info.get('duration', 0))}\n\n"
+                        f"Теперь вы можете использовать любую функцию для анализа."
+                    )
+                    
+                    return True
+                else:
+                    QMessageBox.warning(self, "Предупреждение", "Не удалось обработать введенный транскрипт.")
+                    return False
+            except Exception as e:
+                QMessageBox.critical(self, "Ошибка", f"Ошибка при обработке ручного транскрипта: {str(e)}")
+                return False
+        
+        return False
 
     def run_summarize(self):
         url = self.url_input.text().strip()
@@ -126,8 +192,25 @@ class YouTubeSummarizerUI(QMainWindow):
             return
 
         if not self.processed_transcript_fragments:
-             QMessageBox.critical(self, "Ошибка", "Нет данных транскрипта для саммаризации.")
-             return
+            # Предлагаем ручной ввод если данных все еще нет
+            reply = QMessageBox.question(
+                self, 
+                "Нет данных транскрипта",
+                "Нет данных транскрипта для саммаризации.\n\n"
+                "Хотите ввести транскрипт вручную?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                if not self._get_manual_transcript(url):
+                    return
+            else:
+                return
+        
+        if not self.processed_transcript_fragments:
+            QMessageBox.critical(self, "Ошибка", "Нет данных транскрипта для саммаризации.")
+            return
 
         # Собираем plain_text из обработанных фрагментов для саммаризации
         plain_text_for_summary = " ".join(f["text"] for f in self.processed_transcript_fragments)
@@ -162,7 +245,111 @@ class YouTubeSummarizerUI(QMainWindow):
             logger.error(f"Unsupported URL type: {url_type}")
             QMessageBox.critical(self, "Ошибка", "Неподдерживаемый тип URL.")
     
+    def run_check_video(self):
+        """Check a single video for transcript and tricks (analysis only, no download)."""
+        url = self.url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, введите URL.")
+            return
+        
+        # Detect URL type
+        logger.info(f"Checking video: {url}")
+        url_type = self.url_detector.detect_url_type(url)
+        logger.info(f"Detected URL type: {url_type}")
+        
+        if url_type != URLType.SINGLE_VIDEO:
+            QMessageBox.warning(
+                self, 
+                "Предупреждение", 
+                "Функция 'Проверить видео' работает только с отдельными видео.\n"
+                "Для плейлистов и каналов используйте 'Извлечь и скачать трюки'."
+            )
+            return
+        
+        logger.info("Starting single video check (analysis only)")
+        
+        # Get transcript data
+        if not self._fetch_transcript_data(url):
+            return
 
+        if not self.processed_transcript_fragments:
+            # Предлагаем ручной ввод если данных все еще нет
+            reply = QMessageBox.question(
+                self, 
+                "Нет данных транскрипта",
+                "Нет данных транскрипта для анализа.\n\n"
+                "Хотите ввести транскрипт вручную?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                if not self._get_manual_transcript(url):
+                    return
+            else:
+                return
+        
+        if not self.processed_transcript_fragments:
+            QMessageBox.critical(self, "Ошибка", "Нет данных транскрипта для анализа.")
+            return
+
+        try:
+            # Analyze transcript and find tricks
+            trick_segments = vp.extract_trick_segments(self.processed_transcript_fragments)
+            
+            # Prepare detailed report
+            video_title = self.video_info.get('title', 'Без названия')
+            video_duration = self.video_info.get('duration', 'Неизвестно')
+            
+            result_lines = [
+                f"📹 АНАЛИЗ ВИДЕО: {video_title}",
+                f"⏱️ Длительность: {video_duration} сек" if isinstance(video_duration, (int, float)) else f"⏱️ Длительность: {video_duration}",
+                f"📝 Фрагментов транскрипта: {len(self.processed_transcript_fragments)}",
+                "",
+                f"🎯 НАЙДЕНО ТРЮКОВ: {len(trick_segments)}",
+                ""
+            ]
+
+            if trick_segments:
+                result_lines.append("📋 ДЕТАЛИ ТРЮКОВ:")
+                total_tricks_duration = 0
+                
+                for i, seg in enumerate(trick_segments, 1):
+                    start_td = self.seconds_to_timecode(seg['start'])
+                    end_td = self.seconds_to_timecode(seg['end'])
+                    duration_td = self.seconds_to_timecode(seg['duration'])
+                    total_tricks_duration += seg['duration']
+                    
+                    result_lines.append(f"  {i}. Трюк {start_td} - {end_td} (Длительность: {duration_td})")
+                
+                result_lines.extend([
+                    "",
+                    f"⏱️ ОБЩАЯ ДЛИТЕЛЬНОСТЬ ТРЮКОВ: {self.seconds_to_timecode(total_tricks_duration)}",
+                    f"📊 ПРОЦЕНТ ОТ ВИДЕО: {(total_tricks_duration / video_duration * 100):.1f}%" if isinstance(video_duration, (int, float)) and video_duration > 0 else "📊 ПРОЦЕНТ ОТ ВИДЕО: Неизвестно",
+                    "",
+                    "💡 Для скачивания видео файлов используйте кнопку 'Извлечь и скачать трюки'"
+                ])
+            else:
+                result_lines.extend([
+                    "❌ Трюки не найдены в этом видео.",
+                    "",
+                    "🔍 ВОЗМОЖНЫЕ ПРИЧИНЫ:",
+                    "  • Видео содержит непрерывную речь/комментарии",
+                    "  • Нет достаточно длинных 'тихих' сегментов (минимум 10 сек)",
+                    "  • Транскрипт содержит много текста даже в моменты трюков",
+                    "",
+                    "💡 РЕКОМЕНДАЦИИ:",
+                    "  • Попробуйте другое видео с меньшим количеством комментариев",
+                    "  • Проверьте, есть ли в видео сегменты только с музыкой"
+                ])
+
+            self.output_text_area.setPlainText("\n".join(result_lines))
+            logger.info(f"Video check completed: {len(trick_segments)} tricks found")
+
+        except Exception as e:
+            error_msg = f"Ошибка при анализе видео: {str(e)}"
+            logger.error(error_msg)
+            QMessageBox.critical(self, "Ошибка при анализе видео", error_msg)
 
     def run_download_tricks(self):
         url = self.url_input.text().strip()
@@ -170,8 +357,42 @@ class YouTubeSummarizerUI(QMainWindow):
             return
 
         if not self.processed_transcript_fragments:
+            # Предлагаем ручной ввод если данных все еще нет
+            reply = QMessageBox.question(
+                self, 
+                "Нет данных транскрипта",
+                "Нет данных транскрипта для извлечения трюков.\n\n"
+                "Хотите ввести транскрипт вручную?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                if not self._get_manual_transcript(url):
+                    return
+            else:
+                return
+        
+        if not self.processed_transcript_fragments:
             QMessageBox.critical(self, "Ошибка", "Нет данных транскрипта для извлечения трюков.")
             return
+        
+        # Проверяем доступность папки сохранения
+        output_folder = self.get_output_folder()
+        if not SettingsManager.validate_folder(output_folder):
+            reply = QMessageBox.question(
+                self, 
+                "Папка недоступна", 
+                f"Папка сохранения '{output_folder}' недоступна для записи.\n\nВыбрать другую папку?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.folder_selection_widget.select_folder()
+                # Проверяем еще раз после выбора
+                if not SettingsManager.validate_folder(self.get_output_folder()):
+                    return
+            else:
+                return
 
         try:
             # Извлекаем сегменты трюков
@@ -191,7 +412,12 @@ class YouTubeSummarizerUI(QMainWindow):
             QApplication.processEvents()
             
             # Скачиваем видео сегменты, передаем информацию о видео для создания подпапки
-            downloaded_files = vp.extract_video_segments(video_id, trick_segments, video_info=self.video_info)
+            downloaded_files = vp.extract_video_segments(
+                video_id, 
+                trick_segments, 
+                output_dir=self.get_output_folder(),
+                video_info=self.video_info
+            )
             
             if downloaded_files:
                 result_lines = [f"Успешно скачано {len(downloaded_files)} видео трюков из видео \"{self.video_info.get('title', 'Без названия')}\":\n"]
@@ -281,6 +507,23 @@ class YouTubeSummarizerUI(QMainWindow):
         """Run batch processing for channels and playlists."""
         logger.info(f"Starting batch processing for URL: {source_url}")
         
+        # Проверяем доступность папки сохранения
+        output_folder = self.get_output_folder()
+        if not SettingsManager.validate_folder(output_folder):
+            reply = QMessageBox.question(
+                self, 
+                "Папка недоступна", 
+                f"Папка сохранения '{output_folder}' недоступна для записи.\n\nВыбрать другую папку?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.folder_selection_widget.select_folder()
+                # Проверяем еще раз после выбора
+                if not SettingsManager.validate_folder(self.get_output_folder()):
+                    return
+            else:
+                return
+        
         # Show progress widgets
         logger.debug("Showing progress widgets")
         self.progress_widget.show()
@@ -293,7 +536,7 @@ class YouTubeSummarizerUI(QMainWindow):
         self.cancel_token.clear()
         
         # Get batch options (for now use defaults, later from settings dialog)
-        options = BatchOptions(max_videos=50)
+        options = BatchOptions(max_videos=50, output_dir=self.get_output_folder())
         logger.info(f"Batch options: max_videos={options.max_videos}")
         
         # Start batch processing in a separate thread
@@ -358,6 +601,7 @@ class YouTubeSummarizerUI(QMainWindow):
     def set_buttons_enabled(self, enabled):
         """Enable or disable all buttons."""
         self.summarize_button.setEnabled(enabled)
+        self.check_video_button.setEnabled(enabled)
         self.extract_and_download_button.setEnabled(enabled)
         self.batch_settings_button.setEnabled(enabled)
 
@@ -397,11 +641,189 @@ class BatchProcessingThread(QThread):
         self.progress_update.emit(current, total, message)
 
 
+class ManualTranscriptDialog(QDialog):
+    """Dialog for manual transcript input when automatic extraction fails."""
+    
+    def __init__(self, parent=None, video_url=""):
+        super().__init__(parent)
+        self.setWindowTitle("Ручной ввод транскрипта")
+        self.setModal(True)
+        self.resize(600, 500)
+        
+        layout = QVBoxLayout(self)
+        
+        # Info label
+        info_label = QLabel(
+            "Не удалось автоматически получить транскрипт для видео.\n"
+            "Вы можете вручную скопировать и вставить текст транскрипта для анализа.\n\n"
+            "Инструкция:\n"
+            "1. Откройте видео на YouTube\n"
+            "2. Нажмите на кнопку '...' под видео\n"
+            "3. Выберите 'Показать расшифровку'\n"
+            "4. Скопируйте весь текст и вставьте его ниже"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Video URL display
+        if video_url:
+            url_label = QLabel(f"URL видео: {video_url}")
+            url_label.setWordWrap(True)
+            url_label.setStyleSheet("font-weight: bold; color: blue;")
+            layout.addWidget(url_label)
+        
+        # Transcript input area
+        transcript_label = QLabel("Вставьте текст транскрипта:")
+        layout.addWidget(transcript_label)
+        
+        self.transcript_text = QTextEdit()
+        self.transcript_text.setPlaceholderText(
+            "Вставьте сюда текст транскрипта...\n\n"
+            "Пример:\n"
+            "0:00\n"
+            "привет всем сегодня я покажу вам новый трюк\n"
+            "0:15\n"
+            "сначала нужно взять доску и поставить ее вот так\n"
+            "..."
+        )
+        self.transcript_text.setMinimumHeight(250)
+        layout.addWidget(self.transcript_text)
+        
+        # Video title input
+        title_label = QLabel("Название видео (опционально):")
+        layout.addWidget(title_label)
+        
+        self.title_input = QLineEdit()
+        self.title_input.setPlaceholderText("Введите название видео для лучшей организации файлов")
+        layout.addWidget(self.title_input)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        # Enable OK button only when transcript is not empty
+        self.ok_button = buttons.button(QDialogButtonBox.Ok)
+        self.ok_button.setEnabled(False)
+        self.transcript_text.textChanged.connect(self.check_input)
+    
+    def check_input(self):
+        """Enable OK button only when transcript text is provided."""
+        has_text = bool(self.transcript_text.toPlainText().strip())
+        self.ok_button.setEnabled(has_text)
+    
+    def get_transcript_data(self):
+        """Get the manually entered transcript data."""
+        transcript_text = self.transcript_text.toPlainText().strip()
+        video_title = self.title_input.text().strip() or "Ручной транскрипт"
+        
+        # Parse the transcript text into fragments
+        fragments = self.parse_manual_transcript(transcript_text)
+        
+        # Create video info
+        video_info = {
+            'title': video_title,
+            'duration': self.estimate_duration_from_fragments(fragments) if fragments else 0
+        }
+        
+        return fragments, video_info
+    
+    def parse_manual_transcript(self, text):
+        """Parse manually entered transcript text into fragments."""
+        fragments = []
+        lines = text.split('\n')
+        current_time = 0
+        current_text = ""
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Check if line looks like a timestamp (e.g., "0:00", "1:23", "12:34")
+            if ':' in line and len(line.split(':')) == 2:
+                try:
+                    time_parts = line.split(':')
+                    minutes = int(time_parts[0])
+                    seconds = int(time_parts[1])
+                    timestamp = minutes * 60 + seconds
+                    
+                    # Save previous fragment if exists
+                    if current_text:
+                        fragments.append({
+                            'start': current_time,
+                            'text': current_text.strip()
+                        })
+                    
+                    # Start new fragment
+                    current_time = timestamp
+                    current_text = ""
+                    continue
+                except ValueError:
+                    pass
+            
+            # Add line to current text
+            if current_text:
+                current_text += " " + line
+            else:
+                current_text = line
+        
+        # Add final fragment
+        if current_text:
+            fragments.append({
+                'start': current_time,
+                'text': current_text.strip()
+            })
+        
+        # If no timestamps were found, treat entire text as one fragment
+        if not fragments and text:
+            fragments.append({
+                'start': 0,
+                'text': text
+            })
+        
+        # Calculate duration for each fragment
+        self._calculate_fragment_durations(fragments)
+        
+        return fragments
+    
+    def _calculate_fragment_durations(self, fragments):
+        """Calculate duration for each fragment based on timestamps and text length."""
+        for i, fragment in enumerate(fragments):
+            if i < len(fragments) - 1:
+                # Duration is the time until the next fragment starts
+                next_start = fragments[i + 1]['start']
+                fragment['duration'] = next_start - fragment['start']
+            else:
+                # For the last fragment, estimate duration based on text length
+                text = fragment.get('text', '')
+                estimated_duration = len(text.split()) * 0.5  # ~0.5 seconds per word
+                # Minimum duration of 1 second, maximum of 30 seconds for estimation
+                fragment['duration'] = max(1.0, min(30.0, estimated_duration))
+    
+    def estimate_duration_from_fragments(self, fragments):
+        """Estimate video duration from transcript fragments."""
+        if not fragments:
+            return 0
+        
+        # Find the last timestamp and add estimated duration for last fragment
+        last_fragment = fragments[-1]
+        last_start = last_fragment.get('start', 0)
+        
+        # Estimate duration based on text length (rough approximation)
+        last_text = last_fragment.get('text', '')
+        estimated_last_duration = len(last_text.split()) * 0.5  # ~0.5 seconds per word
+        
+        return last_start + estimated_last_duration
+
+
 class BatchSettingsDialog(QDialog):
     """Dialog for configuring batch processing settings."""
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.parent_ui = parent
         self.setWindowTitle("Настройки пакетной обработки")
         self.setModal(True)
         self.resize(400, 300)
@@ -432,7 +854,9 @@ class BatchSettingsDialog(QDialog):
     
     def get_options(self):
         """Get batch processing options from the dialog."""
+        output_dir = self.parent_ui.get_output_folder() if self.parent_ui else "tricks"
         return BatchOptions(
             max_videos=self.max_videos_spin.value(),
-            skip_existing=self.skip_existing_check.isChecked()
+            skip_existing=self.skip_existing_check.isChecked(),
+            output_dir=output_dir
         )

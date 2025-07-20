@@ -125,18 +125,41 @@ def clear_transcript_cache(video_id=None):
         return True
     return False
 
-def get_transcript(video_id: str, lang_priority=("ru", "en"), use_cache=True):
+def _get_transcript_with_retry(video_id: str, languages: list, cookies_param=None, max_retries=3):
+    """
+    Получает транскрипт с повторными попытками при ошибке 429.
+    """
+    import random
+    
+    for attempt in range(max_retries):
+        try:
+            return YouTubeTranscriptApi.get_transcript(video_id, languages=languages, cookies=cookies_param)
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "Too Many Requests" in error_str:
+                if attempt < max_retries - 1:
+                    # Экспоненциальная задержка с джиттером
+                    wait_time = (2 ** attempt) + random.uniform(0, 2)
+                    logger.warning(f"Получена ошибка 429, ждем {wait_time:.1f} секунд перед повторной попыткой...")
+                    time.sleep(wait_time)
+                    continue
+            raise
+
+
+def get_transcript(url_or_id: str, lang_priority=("ru", "en"), use_cache=True):
     """
     Возвращает plain-text транскрипт (str). Бросает RuntimeError, если ничего не удалось.
     
     Args:
-        video_id: ID видео на YouTube
+        url_or_id: URL видео на YouTube или ID видео (11 символов)
         lang_priority: Приоритет языков для транскрипта
         use_cache: Использовать ли кэширование (по умолчанию True)
     
     Returns:
         Кортеж (plain_text, processed_fragments, video_info)
     """
+    # Извлекаем video_id из URL если передан URL
+    video_id = extract_video_id(url_or_id)
     # Проверяем кэш, если разрешено использование кэша
     if use_cache:
         cache_file = os.path.join(TRANSCRIPT_CACHE_DIR, f"{video_id}.json")
@@ -164,7 +187,7 @@ def get_transcript(video_id: str, lang_priority=("ru", "en"), use_cache=True):
     # 1. youtube-transcript-api с приоритетами
     for lang in lang_priority:
         try:
-            transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang], cookies=cookies_param)
+            transcript = _get_transcript_with_retry(video_id, [lang], cookies_param)
             used_lang = lang
             break
         except Exception:
@@ -173,6 +196,8 @@ def get_transcript(video_id: str, lang_priority=("ru", "en"), use_cache=True):
     # 2. перебор всех доступных + переводимых
     if transcript is None:
         try:
+            # Добавляем задержку перед запросом списка транскриптов
+            time.sleep(1)
             lst = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookies_param)
             for tr in lst:
                 try:
@@ -180,7 +205,9 @@ def get_transcript(video_id: str, lang_priority=("ru", "en"), use_cache=True):
                     used_lang = tr.language_code
                     if transcript:
                         break
-                except Exception:
+                except Exception as e:
+                    if "429" in str(e):
+                        time.sleep(2)  # Дополнительная задержка при 429
                     pass
                 if tr.is_translatable:
                     try:
@@ -189,7 +216,9 @@ def get_transcript(video_id: str, lang_priority=("ru", "en"), use_cache=True):
                         used_lang = target_lang
                         if transcript:
                             break
-                    except Exception:
+                    except Exception as e:
+                        if "429" in str(e):
+                            time.sleep(2)  # Дополнительная задержка при 429
                         pass
         except Exception:
             pass
@@ -435,6 +464,7 @@ def extract_video_list(source_url: str, limit: Optional[int] = None) -> List[Vid
         "quiet": True,
         "nocheckcertificate": True,
         "extract_flat": False,  # Extract individual video info
+        "ignoreerrors": True,   # Continue processing even if some videos fail
     }
     
     # Add playlist limit if specified
@@ -456,6 +486,11 @@ def extract_video_list(source_url: str, limit: Optional[int] = None) -> List[Vid
                 if not video_id:
                     continue
                 
+                # Check for age restrictions or login requirements
+                title = entry.get("title", "Unknown Title")
+                if _is_video_restricted(entry):
+                    continue
+                
                 # Parse upload date
                 upload_date = None
                 if entry.get("upload_date"):
@@ -466,7 +501,7 @@ def extract_video_list(source_url: str, limit: Optional[int] = None) -> List[Vid
                 
                 video_info = VideoInfo(
                     video_id=video_id,
-                    title=entry.get("title", "Unknown Title"),
+                    title=title,
                     url=f"https://www.youtube.com/watch?v={video_id}",
                     duration=entry.get("duration"),
                     upload_date=upload_date,
@@ -481,6 +516,39 @@ def extract_video_list(source_url: str, limit: Optional[int] = None) -> List[Vid
     except Exception as e:
         print(f"Error extracting video list: {e}")
         return []
+
+
+def _is_video_restricted(entry: dict) -> bool:
+    """
+    Check if a video has age restrictions or requires login.
+    
+    Args:
+        entry: Video entry from yt-dlp
+        
+    Returns:
+        True if video is restricted and should be skipped
+    """
+    # Check for age restriction indicators
+    age_limit = entry.get("age_limit", 0)
+    if age_limit and age_limit > 0:
+        return True
+    
+    # Check for availability status
+    availability = entry.get("availability")
+    if availability in ["needs_auth", "premium_only", "subscriber_only"]:
+        return True
+    
+    # Check for live streams (often problematic)
+    if entry.get("is_live") or entry.get("was_live"):
+        return True
+    
+    # Check title for common age restriction indicators
+    title = entry.get("title", "").lower()
+    restricted_keywords = ["age restricted", "sign in", "login required", "private video"]
+    if any(keyword in title for keyword in restricted_keywords):
+        return True
+    
+    return False
 
 
 def get_source_metadata(source_url: str) -> Optional[SourceInfo]:

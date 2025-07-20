@@ -22,3 +22,6 @@ ENV/
 .git-connect.pub 
 cookies.txt
 tricks/
+
+# YoYo AI version control directory
+.yoyo/
