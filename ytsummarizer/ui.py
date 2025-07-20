@@ -21,6 +21,7 @@ from .folder_selection_widget import FolderSelectionWidget
 from .settings_manager import SettingsManager
 from .state_manager import StateManager
 from .resume_dialog import ResumeDialog
+from .youtube_blocking_detector import YouTubeBlockingDetector, BlockingAlert
 
 
 class YouTubeSummarizerUI(QMainWindow):
@@ -36,6 +37,9 @@ class YouTubeSummarizerUI(QMainWindow):
         self.batch_thread = None
         self.cancel_token = Event()
         self.url_detector = URLDetector()
+        
+        # YouTube blocking detection
+        self.blocking_detector = YouTubeBlockingDetector()
 
         # Основная вкладка
         self.main_tab = QWidget()
@@ -479,6 +483,33 @@ class YouTubeSummarizerUI(QMainWindow):
         self.status_label = QLabel("Готов к работе")
         layout.addWidget(self.status_label)
         
+        # Task management buttons
+        task_buttons_layout = QHBoxLayout()
+        
+        self.pause_button = QPushButton("Пауза")
+        self.pause_button.clicked.connect(self.pause_task)
+        self.pause_button.setEnabled(False)
+        task_buttons_layout.addWidget(self.pause_button)
+        
+        self.resume_button = QPushButton("Продолжить")
+        self.resume_button.clicked.connect(self.resume_task)
+        self.resume_button.setEnabled(False)
+        task_buttons_layout.addWidget(self.resume_button)
+        
+        self.stop_button = QPushButton("Остановить")
+        self.stop_button.clicked.connect(self.stop_task)
+        self.stop_button.setEnabled(False)
+        task_buttons_layout.addWidget(self.stop_button)
+        
+        layout.addLayout(task_buttons_layout)
+        
+        # YouTube blocking alert area
+        self.alert_label = QLabel("")
+        self.alert_label.setWordWrap(True)
+        self.alert_label.setStyleSheet("QLabel { background-color: #ffeeee; border: 1px solid #ff0000; padding: 5px; border-radius: 3px; }")
+        self.alert_label.hide()
+        layout.addWidget(self.alert_label)
+        
         return widget
     
     def show_batch_settings(self):
@@ -632,12 +663,149 @@ class YouTubeSummarizerUI(QMainWindow):
         
         self.output_text_area.setPlainText(summary)
     
+    def pause_task(self):
+        """Pause the current task."""
+        logger.info("Task pause requested by user")
+        if self.cancel_token:
+            self.cancel_token.set()
+            self.status_label.setText("Пауза задачи...")
+            self.pause_button.setEnabled(False)
+            self.resume_button.setEnabled(True)
+            self.stop_button.setEnabled(True)
+    
+    def resume_task(self):
+        """Resume the paused task."""
+        logger.info("Task resume requested by user")
+        # In current implementation, we would need to restart the task
+        # For now, we'll show a message to the user
+        reply = QMessageBox.question(
+            self, 
+            "Возобновить обработку", 
+            "Чтобы возобновить обработку, нажмите 'Извлечь и скачать трюки' еще раз.\n\n"
+            "Обработка продолжится с места остановки благодаря сохраненному состоянию.\n\n"
+            "Возобновить сейчас?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            url = self.url_input.text().strip()
+            if url:
+                self.run_extract_and_download_tricks()
+        
+        self.resume_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+    
+    def stop_task(self):
+        """Stop the current task completely."""
+        logger.info("Task stop requested by user")
+        
+        reply = QMessageBox.question(
+            self, 
+            "Остановить обработку", 
+            "Вы хотите полностью остановить обработку?\n\n"
+            "• ДА - остановить и удалить сохраненное состояние\n"
+            "• НЕТ - просто приостановить (можно будет возобновить)",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # Stop completely and delete state
+            if self.cancel_token:
+                self.cancel_token.set()
+            
+            # Delete saved state
+            url = self.url_input.text().strip()
+            if url:
+                from .state_manager import StateManager
+                StateManager.delete_state(url)
+                logger.info("Task stopped and state deleted")
+            
+            self.status_label.setText("Обработка остановлена")
+        else:
+            # Just pause
+            self.pause_task()
+            return
+        
+        self.pause_button.setEnabled(False)
+        self.resume_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+    
+    def show_blocking_alert(self, alert: BlockingAlert):
+        """Show YouTube blocking alert to user."""
+        if alert.severity == "critical":
+            alert_color = "#ffcccc"
+            border_color = "#ff0000"
+            icon = "🚫"
+        else:
+            alert_color = "#fff3cd"
+            border_color = "#ffc107"
+            icon = "⚠️"
+        
+        alert_message = (
+            f"{icon} YouTube {alert.block_type.value.replace('_', ' ').title()}\n\n"
+            f"{alert.message}\n\n"
+            f"💡 Рекомендация: {alert.recommendation}\n\n"
+            f"Обработано ошибок: {alert.error_count} за {alert.time_window.total_seconds()/60:.1f} мин"
+        )
+        
+        self.alert_label.setText(alert_message)
+        self.alert_label.setStyleSheet(
+            f"QLabel {{ background-color: {alert_color}; "
+            f"border: 2px solid {border_color}; "
+            f"padding: 8px; border-radius: 5px; }}"
+        )
+        self.alert_label.show()
+        
+        # Auto-pause if critical
+        if alert.severity == "critical":
+            self.pause_task()
+        
+        logger.warning(f"Blocking alert shown: {alert.block_type.value} - {alert.message}")
+    
+    def hide_blocking_alert(self):
+        """Hide the blocking alert."""
+        self.alert_label.hide()
+    
+    def check_youtube_blocking(self, status_code: int, error_message: str, 
+                              request_type: str = "unknown", video_id: str = None):
+        """Check for YouTube blocking and show alert if needed."""
+        alert = self.blocking_detector.record_error(
+            status_code, error_message, request_type, video_id
+        )
+        
+        if alert:
+            self.show_blocking_alert(alert)
+            return True
+        
+        return False
+    
+    def record_youtube_success(self, request_type: str = "unknown", video_id: str = None):
+        """Record successful YouTube request."""
+        self.blocking_detector.record_success(request_type, video_id)
+        
+        # Hide alert if we had one and now have success
+        if not self.blocking_detector.current_alert:
+            self.hide_blocking_alert()
+    
     def set_buttons_enabled(self, enabled):
         """Enable or disable all buttons."""
         self.summarize_button.setEnabled(enabled)
         self.check_video_button.setEnabled(enabled)
         self.extract_and_download_button.setEnabled(enabled)
         self.batch_settings_button.setEnabled(enabled)
+        
+        # Enable task management buttons only when processing is active
+        if enabled:
+            # Processing finished - disable task management buttons
+            self.pause_button.setEnabled(False)
+            self.resume_button.setEnabled(False)
+            self.stop_button.setEnabled(False)
+        else:
+            # Processing started - enable pause and stop buttons
+            self.pause_button.setEnabled(True)
+            self.resume_button.setEnabled(False)
+            self.stop_button.setEnabled(True)
 
 
 class BatchProcessingThread(QThread):

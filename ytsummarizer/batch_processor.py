@@ -594,30 +594,8 @@ class BatchProcessor:
             return "Unknown_Video"
         
         return name.strip()
-
-
-# Convenience functions for easy usage
-def process_source_batch(source_url: str, options: Optional[BatchOptions] = None, 
-                        progress_callback: Optional[Callable] = None,
-                        cancel_token: Optional[Event] = None) -> BatchResult:
-    """
-    Convenience function to process a source in batch mode.
     
-    Args:
-        source_url: URL of the channel or playlist
-        options: Processing options (uses defaults if None)
-        progress_callback: Function to call for progress updates
-        cancel_token: Event object to check for cancellation
-        
-    Returns:
-        BatchResult with processing statistics
-    """
-    if options is None:
-        options = BatchOptions()
-    
-    processor = BatchProcessor(progress_callback, cancel_token)
-    return processor.process_source(source_url, options)   
- def _load_progress(self, source_url: str) -> Optional[dict]:
+    def _load_progress(self, source_url: str) -> Optional[dict]:
         """
         Загружает прогресс обработки для источника
         
@@ -715,3 +693,26 @@ def process_source_batch(source_url: str, options: Optional[BatchOptions] = None
         except Exception as e:
             logger.error(f"Error checking source changes: {e}")
             return False, f"Ошибка при проверке изменений: {e}"
+
+
+# Convenience functions for easy usage
+def process_source_batch(source_url: str, options: Optional[BatchOptions] = None, 
+                        progress_callback: Optional[Callable] = None,
+                        cancel_token: Optional[Event] = None) -> BatchResult:
+    """
+    Convenience function to process a source in batch mode.
+    
+    Args:
+        source_url: URL of the channel or playlist
+        options: Processing options (uses defaults if None)
+        progress_callback: Function to call for progress updates
+        cancel_token: Event object to check for cancellation
+        
+    Returns:
+        BatchResult with processing statistics
+    """
+    if options is None:
+        options = BatchOptions()
+    
+    processor = BatchProcessor(progress_callback, cancel_token)
+    return processor.process_source(source_url, options)
