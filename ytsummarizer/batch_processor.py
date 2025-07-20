@@ -22,6 +22,7 @@ from .transcripts import (
 )
 from .video_processor import extract_trick_segments, extract_video_segments
 from .url_detector import URLDetector, URLType
+from .state_manager import StateManager
 
 
 @dataclass
@@ -34,6 +35,7 @@ class BatchOptions:
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
     output_dir: str = "tricks"
+    auto_resume: bool = True  # Автоматически возобновлять обработку без запроса
 
 
 @dataclass
@@ -98,13 +100,14 @@ class BatchProcessor:
         self.url_detector = URLDetector()
         self.logger = logging.getLogger(__name__)
     
-    def process_source(self, source_url: str, options: BatchOptions) -> BatchResult:
+    def process_source(self, source_url: str, options: BatchOptions, resume: bool = False) -> BatchResult:
         """
         Process all videos from a YouTube source (channel or playlist).
         
         Args:
             source_url: URL of the channel or playlist
             options: Processing options and filters
+            resume: Whether to resume from previous state (if available)
             
         Returns:
             BatchResult with processing statistics and results
@@ -174,6 +177,10 @@ class BatchProcessor:
                     error_type="VIDEO_LIST_ERROR",
                     error_message=error_msg
                 ))
+                
+                # Удаляем сохраненное состояние, если оно есть
+                StateManager.delete_state(source_url)
+                
                 return result
             else:
                 logger.debug(f"Extracted {len(videos)} videos from source")
@@ -202,12 +209,55 @@ class BatchProcessor:
         filtered_videos = self._apply_filters(videos, options)
         logger.debug(f"After filtering: {len(filtered_videos)} videos remain")
         
+        # Check for saved state and resume if requested
+        saved_state = None
+        start_index = 0
+        processed_video_ids = []
+        
+        if resume:
+            saved_state = self._load_progress(source_url)
+            if saved_state:
+                logger.debug(f"Found saved state for {source_url}")
+                
+                # Check for changes in the source
+                source_changed, change_message = self._check_source_changes(
+                    source_url, filtered_videos, saved_state
+                )
+                
+                if source_changed:
+                    logger.warning(f"Source content changed: {change_message}")
+                    # Continue with resume but log the changes
+                
+                # Get processed videos and start index
+                processed_video_ids = saved_state.get("processed_video_ids", [])
+                start_index = saved_state.get("last_processed_index", -1) + 1
+                
+                if start_index >= len(filtered_videos):
+                    logger.debug(f"All videos already processed, starting from beginning")
+                    start_index = 0
+                    processed_video_ids = []
+                else:
+                    logger.debug(f"Resuming from video {start_index+1}/{len(filtered_videos)}")
+        
         # Process videos
-        logger.debug(f"Starting video processing...")
+        logger.debug(f"Starting video processing from index {start_index}...")
         try:
-            result = self.process_video_list(filtered_videos, source_info, options)
+            result = self.process_video_list(
+                filtered_videos, 
+                source_info, 
+                options,
+                start_index=start_index,
+                processed_video_ids=processed_video_ids,
+                source_url=source_url
+            )
             result.processing_time = time.time() - start_time
             result.end_time = datetime.now()
+            
+            # If processing completed successfully, delete the state
+            if not result.cancelled and result.processed_videos == len(filtered_videos):
+                StateManager.delete_state(source_url)
+                logger.debug(f"Processing completed, state deleted")
+            
             logger.debug(f"process_source completed successfully")
             return result
         except Exception as e:
@@ -227,7 +277,9 @@ class BatchProcessor:
             return result
     
     def process_video_list(self, videos: List[VideoInfo], source_info: SourceInfo, 
-                          options: BatchOptions) -> BatchResult:
+                          options: BatchOptions, start_index: int = 0,
+                          processed_video_ids: List[str] = None,
+                          source_url: str = None) -> BatchResult:
         """
         Process a list of videos for trick extraction.
         
@@ -235,26 +287,45 @@ class BatchProcessor:
             videos: List of VideoInfo objects to process
             source_info: Information about the source
             options: Processing options
+            start_index: Index to start processing from (for resuming)
+            processed_video_ids: List of already processed video IDs
+            source_url: URL of the source (for saving state)
             
         Returns:
             BatchResult with processing statistics
         """
+        if processed_video_ids is None:
+            processed_video_ids = []
         result = BatchResult(
             source_info=source_info,
-            total_videos=len(videos)
+            total_videos=len(videos),
+            processed_videos=len(processed_video_ids)  # Initialize with already processed count
         )
         
         logger.debug(f"Starting batch processing of {len(videos)} videos from {source_info.name}")
-        self._report_progress(0, len(videos), "Starting batch processing...")
+        if start_index > 0:
+            self._report_progress(start_index, len(videos), f"Resuming from video {start_index+1}...")
+        else:
+            self._report_progress(0, len(videos), "Starting batch processing...")
         
-        for i, video in enumerate(videos):
+        for i, video in enumerate(videos[start_index:], start=start_index):
             logger.debug(f"Processing video {i+1}/{len(videos)}: {video.title}")
+            
+            # Skip already processed videos
+            if video.video_id in processed_video_ids:
+                logger.debug(f"Skipping already processed video: {video.title}")
+                continue
             
             # Check for cancellation
             if self.cancel_token and self.cancel_token.is_set():
                 logger.debug(f"Batch processing cancelled at video {i+1}")
                 result.cancelled = True
                 self._report_progress(i, len(videos), "Processing cancelled")
+                
+                # Save progress for resuming later
+                if source_url:
+                    self._save_progress(source_url, source_info, videos, processed_video_ids, i, len(videos))
+                
                 break
             
             # Report progress
@@ -270,10 +341,17 @@ class BatchProcessor:
                     result.total_tricks += video_result.tricks_found
                     result.total_segments += len(video_result.segments_extracted)
                     logger.debug(f"Video {i+1} processed successfully: {video_result.tricks_found} tricks, {len(video_result.segments_extracted)} segments")
+                    
+                    # Add to processed videos
+                    processed_video_ids.append(video.video_id)
                 else:
                     if video_result.error:
                         result.errors.append(video_result.error)
                         logger.debug(f"Video {i+1} failed: {video_result.error.error_type} - {video_result.error.error_message}")
+                
+                # Save progress after each video
+                if source_url:
+                    self._save_progress(source_url, source_info, videos, processed_video_ids, i, len(videos))
                 
             except Exception as e:
                 logger.exception(f"Critical error processing video {i+1}: {str(e)}")
@@ -296,6 +374,11 @@ class BatchProcessor:
         if not result.cancelled:
             logger.debug(f"Batch processing completed successfully")
             self._report_progress(len(videos), len(videos), "Batch processing complete")
+            
+            # Delete state file on successful completion
+            if source_url:
+                StateManager.delete_state(source_url)
+                logger.debug(f"State file deleted after successful completion")
         
         logger.debug(f"Final stats: {result.processed_videos} processed, {result.successful_extractions} successful, {len(result.errors)} errors")
         
@@ -533,4 +616,102 @@ def process_source_batch(source_url: str, options: Optional[BatchOptions] = None
         options = BatchOptions()
     
     processor = BatchProcessor(progress_callback, cancel_token)
-    return processor.process_source(source_url, options)
+    return processor.process_source(source_url, options)   
+ def _load_progress(self, source_url: str) -> Optional[dict]:
+        """
+        Загружает прогресс обработки для источника
+        
+        Args:
+            source_url: URL источника
+            
+        Returns:
+            Словарь с информацией о прогрессе или None
+        """
+        try:
+            state = StateManager.load_state(source_url)
+            if not StateManager.is_state_valid(state):
+                logger.debug(f"Saved state for {source_url} is invalid or expired")
+                return None
+            
+            return state
+        except Exception as e:
+            logger.error(f"Error loading progress: {e}")
+            return None
+    
+    def _save_progress(self, source_url: str, source_info: SourceInfo, 
+                      videos: List[VideoInfo], processed_video_ids: List[str],
+                      current_index: int, total_videos: int) -> None:
+        """
+        Сохраняет прогресс обработки
+        
+        Args:
+            source_url: URL источника
+            source_info: Информация об источнике
+            videos: Список видео
+            processed_video_ids: Список обработанных video_id
+            current_index: Текущий индекс обработки
+            total_videos: Общее количество видео
+        """
+        try:
+            # Создаем информацию о последнем обработанном видео
+            last_video = None
+            if 0 <= current_index < len(videos):
+                video = videos[current_index]
+                last_video = {
+                    "video_id": video.video_id,
+                    "title": video.title,
+                    "url": video.url
+                }
+            
+            # Создаем состояние
+            state = {
+                "source_type": source_info.type.name,
+                "source_name": source_info.name,
+                "total_videos": total_videos,
+                "processed_videos": len(processed_video_ids),
+                "last_processed_index": current_index,
+                "last_processed_video": last_video,
+                "processed_video_ids": processed_video_ids
+            }
+            
+            # Сохраняем состояние
+            StateManager.save_state(source_url, state)
+            logger.debug(f"Progress saved: {len(processed_video_ids)}/{total_videos} videos processed")
+        except Exception as e:
+            logger.error(f"Error saving progress: {e}")
+    
+    def _check_source_changes(self, source_url: str, current_videos: List[VideoInfo], 
+                             saved_state: dict) -> tuple[bool, str]:
+        """
+        Проверяет изменения в составе источника
+        
+        Args:
+            source_url: URL источника
+            current_videos: Текущий список видео
+            saved_state: Сохраненное состояние
+            
+        Returns:
+            (изменился_ли_источник, сообщение_об_изменениях)
+        """
+        try:
+            # Получаем список video_id из текущего списка
+            current_video_ids = [v.video_id for v in current_videos]
+            
+            # Получаем список video_id из сохраненного состояния
+            saved_total = saved_state.get("total_videos", 0)
+            
+            # Если количество видео сильно изменилось, считаем что источник изменился
+            if abs(len(current_videos) - saved_total) > 5:
+                return True, f"Количество видео изменилось: было {saved_total}, стало {len(current_videos)}"
+            
+            # Проверяем наличие обработанных видео в текущем списке
+            processed_ids = saved_state.get("processed_video_ids", [])
+            missing_videos = [vid for vid in processed_ids if vid not in current_video_ids]
+            
+            if missing_videos:
+                return True, f"Некоторые обработанные видео больше не доступны ({len(missing_videos)} шт.)"
+            
+            return False, "Источник не изменился"
+        except Exception as e:
+            logger.error(f"Error checking source changes: {e}")
+            return False, f"Ошибка при проверке изменений: {e}"

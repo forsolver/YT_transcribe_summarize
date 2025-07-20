@@ -19,6 +19,8 @@ from .url_detector import URLDetector, URLType
 from .batch_processor import BatchProcessor, BatchOptions, BatchResult
 from .folder_selection_widget import FolderSelectionWidget
 from .settings_manager import SettingsManager
+from .state_manager import StateManager
+from .resume_dialog import ResumeDialog
 
 
 class YouTubeSummarizerUI(QMainWindow):
@@ -539,9 +541,41 @@ class YouTubeSummarizerUI(QMainWindow):
         options = BatchOptions(max_videos=50, output_dir=self.get_output_folder())
         logger.info(f"Batch options: max_videos={options.max_videos}")
         
+        # Check for saved state
+        resume = False
+        saved_state = StateManager.load_state(source_url)
+        
+        if saved_state and StateManager.is_state_valid(saved_state):
+            logger.debug(f"Found saved state for {source_url}")
+            
+            # Check if auto-resume is enabled
+            if options.auto_resume:
+                resume = True
+                logger.debug("Auto-resume enabled, resuming without asking")
+            else:
+                # Show resume dialog
+                dialog = ResumeDialog(self, source_url, saved_state)
+                if dialog.exec_() == QDialog.Accepted:
+                    resume = dialog.get_resume_choice()
+                    remember_choice = dialog.get_remember_choice()
+                    
+                    # Update auto-resume setting if requested
+                    if remember_choice:
+                        options.auto_resume = resume
+                        logger.debug(f"Remembering resume choice: {resume}")
+                else:
+                    # User cancelled
+                    logger.debug("Resume dialog cancelled")
+                    return
+            
+            if not resume:
+                # Delete saved state if not resuming
+                StateManager.delete_state(source_url)
+                logger.debug("Not resuming, deleted saved state")
+        
         # Start batch processing in a separate thread
-        logger.debug("Creating BatchProcessingThread")
-        self.batch_thread = BatchProcessingThread(source_url, options, self.cancel_token)
+        logger.debug(f"Creating BatchProcessingThread (resume={resume})")
+        self.batch_thread = BatchProcessingThread(source_url, options, self.cancel_token, resume)
         self.batch_thread.progress_update.connect(self.update_progress)
         self.batch_thread.finished_signal.connect(self.on_batch_finished)
         self.batch_thread.error_signal.connect(self.on_batch_error)
@@ -613,11 +647,12 @@ class BatchProcessingThread(QThread):
     finished_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str)
     
-    def __init__(self, source_url, options, cancel_token):
+    def __init__(self, source_url, options, cancel_token, resume=False):
         super().__init__()
         self.source_url = source_url
         self.options = options
         self.cancel_token = cancel_token
+        self.resume = resume
     
     def run(self):
         """Run the batch processing operation."""
@@ -628,8 +663,8 @@ class BatchProcessingThread(QThread):
                 progress_callback=self.emit_progress,
                 cancel_token=self.cancel_token
             )
-            logger.debug("Calling processor.process_source()")
-            result = processor.process_source(self.source_url, self.options)
+            logger.debug(f"Calling processor.process_source(resume={self.resume})")
+            result = processor.process_source(self.source_url, self.options, resume=self.resume)
             logger.info(f"BatchProcessor completed successfully, emitting result")
             self.finished_signal.emit(result)
         except Exception as e:
@@ -844,7 +879,32 @@ class BatchSettingsDialog(QDialog):
         self.skip_existing_check = QCheckBox("Пропускать уже обработанные")
         settings_layout.addRow(self.skip_existing_check)
         
+        # Auto resume
+        self.auto_resume_check = QCheckBox("Автоматически возобновлять обработку")
+        self.auto_resume_check.setChecked(True)
+        settings_layout.addRow(self.auto_resume_check)
+        
         layout.addWidget(settings_group)
+        
+        # Saved states group
+        self.saved_states_group = QGroupBox("Сохраненные состояния обработки")
+        saved_states_layout = QVBoxLayout(self.saved_states_group)
+        
+        # List of saved states
+        self.states_list = QTextEdit()
+        self.states_list.setReadOnly(True)
+        self.states_list.setMinimumHeight(100)
+        saved_states_layout.addWidget(self.states_list)
+        
+        # Delete button
+        self.delete_state_button = QPushButton("Удалить выбранное состояние")
+        self.delete_state_button.clicked.connect(self._delete_selected_state)
+        saved_states_layout.addWidget(self.delete_state_button)
+        
+        layout.addWidget(self.saved_states_group)
+        
+        # Load saved states
+        self._load_saved_states()
         
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -858,5 +918,69 @@ class BatchSettingsDialog(QDialog):
         return BatchOptions(
             max_videos=self.max_videos_spin.value(),
             skip_existing=self.skip_existing_check.isChecked(),
-            output_dir=output_dir
+            output_dir=output_dir,
+            auto_resume=self.auto_resume_check.isChecked()
         )
+    
+    def _load_saved_states(self):
+        """Load and display saved states"""
+        try:
+            states = StateManager.list_saved_states()
+            if not states:
+                self.states_list.setText("Нет сохраненных состояний")
+                self.delete_state_button.setEnabled(False)
+                return
+            
+            text = []
+            for state in states:
+                source_name = state.get("source_name", "Неизвестный источник")
+                processed = state.get("processed_videos", 0)
+                total = state.get("total_videos", 0)
+                timestamp = StateManager.format_timestamp(state.get("timestamp", ""))
+                
+                text.append(f"{source_name} ({processed}/{total}) - {timestamp}")
+                text.append(f"URL: {state.get('source_url', '')}")
+                text.append("")
+            
+            self.states_list.setText("\n".join(text))
+            self.delete_state_button.setEnabled(True)
+        except Exception as e:
+            logger.error(f"Error loading saved states: {e}")
+            self.states_list.setText(f"Ошибка загрузки состояний: {e}")
+            self.delete_state_button.setEnabled(False)
+    
+    def _delete_selected_state(self):
+        """Delete selected saved state"""
+        # Get selected text
+        cursor = self.states_list.textCursor()
+        if not cursor.hasSelection():
+            QMessageBox.information(self, "Выбор", "Выделите текст с URL состояния для удаления")
+            return
+        
+        selected_text = cursor.selectedText()
+        
+        # Try to find URL in the selected text
+        import re
+        url_match = re.search(r'URL: (https?://\S+)', selected_text)
+        if not url_match:
+            QMessageBox.information(self, "URL не найден", 
+                                   "Выделите строку, содержащую URL состояния для удаления")
+            return
+        
+        source_url = url_match.group(1)
+        
+        # Confirm deletion
+        reply = QMessageBox.question(
+            self, 
+            "Подтверждение удаления", 
+            f"Вы уверены, что хотите удалить сохраненное состояние для:\n{source_url}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            if StateManager.delete_state(source_url):
+                QMessageBox.information(self, "Успех", "Состояние успешно удалено")
+                self._load_saved_states()  # Refresh the list
+            else:
+                QMessageBox.warning(self, "Ошибка", "Не удалось удалить состояние")
+    
