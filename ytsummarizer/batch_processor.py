@@ -23,6 +23,7 @@ from .transcripts import (
 from .video_processor import extract_trick_segments, extract_video_segments
 from .url_detector import URLDetector, URLType
 from .state_manager import StateManager
+from .settings_manager import SettingsManager
 
 
 @dataclass
@@ -440,9 +441,15 @@ class BatchProcessor:
                     return result
             
             logger.debug(f"Getting transcript for video: {video_info.video_id}")
-            # Get transcript
+            # Get transcript using settings-based language priority
             try:
-                plain_text, fragments, video_info_detailed = get_transcript(video_info.video_id)
+                settings = SettingsManager.load_settings()
+                lang_priority = tuple(settings.get("language_priority", ["en", "ru"]))
+                
+                plain_text, fragments, video_info_detailed = get_transcript(
+                    video_info.video_id, 
+                    lang_priority=lang_priority
+                )
                 logger.debug(f"Successfully got transcript with {len(fragments)} fragments")
             except Exception as e:
                 logger.error(f"Failed to get transcript: {str(e)}")

@@ -37,7 +37,8 @@ class SettingsManager:
         
         # Возвращаем настройки по умолчанию
         return {
-            "output_folder": cls.DEFAULT_OUTPUT_FOLDER
+            "output_folder": cls.DEFAULT_OUTPUT_FOLDER,
+            "language_priority": ["en", "ru"]  # Default to English first for better compatibility
         }
     
     @classmethod

@@ -21,6 +21,7 @@ ENV/
 .git-connect
 .git-connect.pub 
 cookies.txt
+logs/
 tricks/
 
 # Claude v3.0 additions

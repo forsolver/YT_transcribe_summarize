@@ -642,7 +642,16 @@ def _is_video_restricted(entry: dict) -> bool:
     
     # Check for availability status
     availability = entry.get("availability")
-    if availability in ["needs_auth", "premium_only", "subscriber_only"]:
+    if availability in ["needs_auth", "premium_only", "subscriber_only", "private"]:
+        return True
+    
+    # Check for members-only content indicators
+    title = entry.get("title", "").lower()
+    description = entry.get("description", "").lower()
+    if any(keyword in title or keyword in description for keyword in [
+        "members only", "member exclusive", "join this channel", 
+        "exclusive perks", "members-only"
+    ]):
         return True
     
     # Check for live streams (often problematic)
