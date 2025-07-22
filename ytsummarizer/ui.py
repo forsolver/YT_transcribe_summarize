@@ -22,6 +22,7 @@ from .settings_manager import SettingsManager
 from .state_manager import StateManager
 from .resume_dialog import ResumeDialog
 from .youtube_blocking_detector import YouTubeBlockingDetector, BlockingAlert
+from .processing_controller import ProcessingController, BlockingStatus
 
 
 class YouTubeSummarizerUI(QMainWindow):
@@ -504,11 +505,30 @@ class YouTubeSummarizerUI(QMainWindow):
         layout.addLayout(task_buttons_layout)
         
         # YouTube blocking alert area
+        self.alert_widget = QWidget()
+        self.alert_layout = QVBoxLayout(self.alert_widget)
+        
         self.alert_label = QLabel("")
         self.alert_label.setWordWrap(True)
-        self.alert_label.setStyleSheet("QLabel { background-color: #ffeeee; border: 1px solid #ff0000; padding: 5px; border-radius: 3px; }")
-        self.alert_label.hide()
-        layout.addWidget(self.alert_label)
+        self.alert_layout.addWidget(self.alert_label)
+        
+        # Action buttons for blocking alerts
+        self.alert_buttons_layout = QHBoxLayout()
+        self.wait_retry_button = QPushButton("Wait & Retry")
+        self.stop_processing_button = QPushButton("Stop Processing")
+        self.change_ip_button = QPushButton("Change IP Guide")
+        
+        self.wait_retry_button.clicked.connect(self.handle_wait_retry)
+        self.stop_processing_button.clicked.connect(self.handle_stop_processing)
+        self.change_ip_button.clicked.connect(self.handle_change_ip_guide)
+        
+        self.alert_buttons_layout.addWidget(self.wait_retry_button)
+        self.alert_buttons_layout.addWidget(self.stop_processing_button)
+        self.alert_buttons_layout.addWidget(self.change_ip_button)
+        
+        self.alert_layout.addLayout(self.alert_buttons_layout)
+        self.alert_widget.hide()
+        layout.addWidget(self.alert_widget)
         
         return widget
     
@@ -732,7 +752,7 @@ class YouTubeSummarizerUI(QMainWindow):
         self.stop_button.setEnabled(False)
     
     def show_blocking_alert(self, alert: BlockingAlert):
-        """Show YouTube blocking alert to user."""
+        """Show YouTube blocking alert to user with action options."""
         if alert.severity == "critical":
             alert_color = "#ffcccc"
             border_color = "#ff0000"
@@ -742,30 +762,117 @@ class YouTubeSummarizerUI(QMainWindow):
             border_color = "#ffc107"
             icon = "⚠️"
         
+        # Create detailed alert message
         alert_message = (
-            f"{icon} YouTube {alert.block_type.value.replace('_', ' ').title()}\n\n"
-            f"{alert.message}\n\n"
-            f"💡 Рекомендация: {alert.recommendation}\n\n"
-            f"Обработано ошибок: {alert.error_count} за {alert.time_window.total_seconds()/60:.1f} мин"
+            f"{icon} YouTube {alert.block_type.value.replace('_', ' ').title()} Detected\n\n"
+            f"Issue: {alert.message}\n\n"
+            f"💡 Recommendation: {alert.recommendation}\n\n"
+            f"Errors: {alert.error_count} in {alert.time_window.total_seconds()/60:.1f} minutes\n"
+            f"Time Range: {alert.first_error.strftime('%H:%M:%S')} - {alert.last_error.strftime('%H:%M:%S')}"
         )
         
         self.alert_label.setText(alert_message)
-        self.alert_label.setStyleSheet(
-            f"QLabel {{ background-color: {alert_color}; "
+        self.alert_widget.setStyleSheet(
+            f"QWidget {{ background-color: {alert_color}; "
             f"border: 2px solid {border_color}; "
             f"padding: 8px; border-radius: 5px; }}"
         )
-        self.alert_label.show()
         
-        # Auto-pause if critical
+        # Show/hide appropriate action buttons based on blocking type
+        self.wait_retry_button.setVisible(alert.block_type.value in ["rate_limit", "forbidden"])
+        self.change_ip_button.setVisible(alert.block_type.value in ["ip_block", "cloud_ip_block"])
+        self.stop_processing_button.setVisible(True)
+        
+        # Update button text based on blocking type
+        if alert.block_type.value == "rate_limit":
+            self.wait_retry_button.setText("Wait 10 min & Retry")
+        elif alert.block_type.value == "ip_block":
+            self.change_ip_button.setText("IP Change Guide")
+        elif alert.block_type.value == "cloud_ip_block":
+            self.change_ip_button.setText("Use Residential IP")
+        
+        self.alert_widget.show()
+        
+        # Auto-halt processing if critical
         if alert.severity == "critical":
-            self.pause_task()
+            self.halt_processing_due_to_blocking(alert)
         
         logger.warning(f"Blocking alert shown: {alert.block_type.value} - {alert.message}")
     
     def hide_blocking_alert(self):
         """Hide the blocking alert."""
-        self.alert_label.hide()
+        self.alert_widget.hide()
+    
+    def halt_processing_due_to_blocking(self, alert: BlockingAlert):
+        """Halt processing due to critical blocking."""
+        logger.critical("Halting processing due to critical YouTube blocking")
+        
+        # Stop current processing
+        if hasattr(self, 'batch_thread') and self.batch_thread and self.batch_thread.isRunning():
+            self.batch_thread.terminate()
+            self.batch_thread.wait()
+        
+        # Update UI state
+        self.set_buttons_enabled(True)
+        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        
+        # Show status
+        self.status_label.setText("Processing halted due to YouTube blocking")
+    
+    def handle_wait_retry(self):
+        """Handle wait and retry action."""
+        logger.info("User chose to wait and retry")
+        
+        # Clear the blocking alert
+        if hasattr(self, 'blocking_detector'):
+            self.blocking_detector.force_clear_alert()
+        
+        self.hide_blocking_alert()
+        
+        # Show message to user
+        QMessageBox.information(
+            self, 
+            "Waiting Period", 
+            "Blocking alert cleared. You can now retry processing.\n\n"
+            "Note: If blocking persists, consider waiting longer or changing your IP address."
+        )
+    
+    def handle_stop_processing(self):
+        """Handle stop processing action."""
+        logger.info("User chose to stop processing due to blocking")
+        
+        # Stop any running processing
+        if hasattr(self, 'batch_thread') and self.batch_thread and self.batch_thread.isRunning():
+            self.batch_thread.terminate()
+            self.batch_thread.wait()
+        
+        self.hide_blocking_alert()
+        self.set_buttons_enabled(True)
+        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.status_label.setText("Processing stopped by user due to YouTube blocking")
+    
+    def handle_change_ip_guide(self):
+        """Show IP change guidance to user."""
+        logger.info("User requested IP change guidance")
+        
+        ip_guide_message = (
+            "YouTube IP Blocking - How to Change Your IP:\n\n"
+            "🔄 Quick Options:\n"
+            "• Restart your router/modem (wait 5-10 minutes)\n"
+            "• Use mobile hotspot temporarily\n"
+            "• Connect to VPN with residential IP\n\n"
+            "🏠 For Cloud/VPS Users:\n"
+            "• YouTube blocks most cloud provider IPs (AWS, Google Cloud, Azure)\n"
+            "• Switch to residential internet connection\n"
+            "• Use residential proxy service\n\n"
+            "⏰ Alternative:\n"
+            "• Wait 1-24 hours for automatic IP unblocking\n\n"
+            "After changing IP, click 'Wait & Retry' to resume processing."
+        )
+        
+        QMessageBox.information(self, "IP Change Guide", ip_guide_message)
     
     def check_youtube_blocking(self, status_code: int, error_message: str, 
                               request_type: str = "unknown", video_id: str = None):

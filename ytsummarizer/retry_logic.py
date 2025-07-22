@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .error_handler import ErrorHandler, ErrorCategory, ActionType
+from .youtube_blocking_detector import YouTubeBlockingDetector
 
 logger = logging.getLogger("ytsummarizer.retry_logic")
 
@@ -58,6 +59,71 @@ class RetryConfig:
             delay = max(0.1, delay + jitter)  # Minimum 0.1 second delay
         
         return delay
+    
+    def should_retry_with_blocking_check(self, error: Exception, operation_type: str = "unknown") -> bool:
+        """
+        Check if operation should be retried considering blocking status.
+        
+        Args:
+            error: Exception that occurred
+            operation_type: Type of operation (transcript, video_info, etc.)
+            
+        Returns:
+            True if should retry, False if blocked or non-retryable
+        """
+        # Check if operation is blocked due to YouTube blocking
+        if self.is_operation_blocked(operation_type):
+            logger.info(f"Operation {operation_type} is blocked - not retrying")
+            return False
+        
+        # Check if blocking detector indicates we should halt
+        if self.blocking_detector and self.blocking_detector.should_halt_processing():
+            logger.warning(f"YouTube blocking detected - marking {operation_type} as blocked")
+            self.blocked_operations.add(operation_type)
+            return False
+        
+        # Use normal error handling logic
+        error_result = self.error_handler.handle_error(error, {"operation_type": operation_type})
+        return error_result.action == ActionType.RETRY
+    
+    def is_operation_blocked(self, operation_type: str) -> bool:
+        """Check if a specific operation type is blocked due to YouTube blocking."""
+        return operation_type in self.blocked_operations
+    
+    def get_blocking_aware_delay(self, attempt: int, error_category: Optional[ErrorCategory] = None) -> float:
+        """
+        Calculate delay considering blocking status.
+        
+        Args:
+            attempt: Current attempt number
+            error_category: Category of error
+            
+        Returns:
+            Delay in seconds, or -1 if should not retry due to blocking
+        """
+        # Check if we're in a blocking state
+        if self.blocking_detector and self.blocking_detector.should_halt_processing():
+            logger.warning("Blocking detected - returning no-retry signal")
+            return -1  # Signal that retry should not happen
+        
+        # Use normal delay calculation
+        return self.config.get_delay(attempt, error_category)
+    
+    def clear_blocked_operations(self):
+        """Clear all blocked operations (call when blocking is resolved)."""
+        if self.blocked_operations:
+            logger.info(f"Clearing {len(self.blocked_operations)} blocked operations")
+            self.blocked_operations.clear()
+    
+    def mark_operation_as_blocked(self, operation_type: str):
+        """Manually mark an operation as blocked."""
+        self.blocked_operations.add(operation_type)
+        logger.info(f"Operation {operation_type} marked as blocked")
+    
+    def unblock_operation(self, operation_type: str):
+        """Unblock a specific operation type."""
+        self.blocked_operations.discard(operation_type)
+        logger.info(f"Operation {operation_type} unblocked")
 
 
 class RetryResult(Enum):
@@ -71,17 +137,21 @@ class RetryResult(Enum):
 class RetryManager:
     """Advanced retry manager with error handling integration."""
     
-    def __init__(self, error_handler: ErrorHandler, config: Optional[RetryConfig] = None):
+    def __init__(self, error_handler: ErrorHandler, config: Optional[RetryConfig] = None,
+                 blocking_detector: Optional[YouTubeBlockingDetector] = None):
         """
         Initialize RetryManager.
         
         Args:
             error_handler: ErrorHandler instance for error processing
             config: Retry configuration
+            blocking_detector: YouTube blocking detector for blocking-aware retries
         """
         self.error_handler = error_handler
         self.config = config or RetryConfig()
+        self.blocking_detector = blocking_detector
         self.active_retries: Dict[str, int] = {}  # Track retry counts by operation
+        self.blocked_operations: set[str] = set()  # Track operations blocked due to YouTube blocking
     
     def retry_with_backoff(self, 
                           func: Callable,
@@ -147,8 +217,17 @@ class RetryManager:
                     logger.info(f"Operation {operation_id} not retryable: {error_result.action}")
                     break
                 
-                # Calculate delay
-                delay = self.config.get_delay(attempt, error_result.category)
+                # Check for blocking before retrying
+                operation_type = context.get('operation_type', 'unknown')
+                if not self.should_retry_with_blocking_check(e, operation_type):
+                    logger.warning(f"Operation {operation_id} blocked due to YouTube blocking - stopping retries")
+                    break
+                
+                # Calculate delay with blocking awareness
+                delay = self.get_blocking_aware_delay(attempt, error_result.category)
+                if delay < 0:  # Blocking detected
+                    logger.warning(f"Operation {operation_id} halted due to blocking")
+                    break
                 
                 # Use error handler's delay if it's longer
                 if error_result.retry_delay > delay:

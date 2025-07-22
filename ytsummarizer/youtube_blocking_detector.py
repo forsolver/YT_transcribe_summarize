@@ -22,6 +22,7 @@ class BlockType(Enum):
     FORBIDDEN = "forbidden"    # HTTP 403 - Forbidden
     SERVER_ERROR = "server_error"  # HTTP 503 - Service Unavailable
     IP_BLOCK = "ip_block"      # Consistent 403s suggest IP block
+    CLOUD_IP_BLOCK = "cloud_ip_block"  # Cloud provider IP blocking
     UNKNOWN = "unknown"        # Other blocking patterns
 
 
@@ -75,6 +76,17 @@ class YouTubeBlockingDetector:
         self.error_events: List[ErrorEvent] = []
         self.current_alert: Optional[BlockingAlert] = None
         self.last_reset_time = datetime.now()
+        self.processing_halted = False
+        
+        # IP blocking message patterns
+        self.ip_block_patterns = [
+            "YouTube is blocking requests from your IP",
+            "requests from your IP",
+            "cloud provider",
+            "AWS, Google Cloud Platform, Azure",
+            "IP has been blocked by YouTube",
+            "too many requests and your IP has been blocked"
+        ]
         
         logger.info(f"YouTubeBlockingDetector initialized with thresholds: "
                    f"max_errors={max_errors_threshold}, time_window={time_window_minutes}min, "
@@ -161,29 +173,47 @@ class YouTubeBlockingDetector:
             self.current_alert = None
             return None
         
+        # Check for IP blocking message patterns (highest priority)
+        for error in recent_errors:
+            if self._contains_ip_block_pattern(error.error_message):
+                block_type = BlockType.CLOUD_IP_BLOCK if "cloud provider" in error.error_message.lower() else BlockType.IP_BLOCK
+                alert = self._create_alert(
+                    block_type,
+                    "critical",
+                    f"IP blocking detected: {error.error_message[:100]}...",
+                    "Change your IP address immediately. Cloud provider IPs are blocked by YouTube.",
+                    recent_errors
+                )
+                self.halt_processing()  # Immediately halt processing
+                return alert
+        
         # Check for rate limiting (HTTP 429)
         rate_limit_errors = [e for e in recent_errors if e.status_code == 429]
         if len(rate_limit_errors) >= 2:
-            return self._create_alert(
+            alert = self._create_alert(
                 BlockType.RATE_LIMIT,
                 "critical",
                 f"Rate limiting detected: {len(rate_limit_errors)} HTTP 429 errors",
                 "Wait 10-30 minutes before retrying. Consider reducing request frequency.",
                 recent_errors
             )
+            self.halt_processing()  # Halt processing for rate limiting
+            return alert
         
         # Check for consecutive 403 errors (potential IP block)
         if len(recent_errors) >= self.consecutive_403_threshold:
             recent_403s = [e for e in recent_errors[-self.consecutive_403_threshold:] 
                           if e.status_code == 403]
             if len(recent_403s) == self.consecutive_403_threshold:
-                return self._create_alert(
+                alert = self._create_alert(
                     BlockType.IP_BLOCK,
                     "critical",
                     f"Potential IP block: {len(recent_403s)} consecutive 403 errors",
                     "Change your IP address (restart router, use VPN, or wait 1-24 hours).",
                     recent_errors
                 )
+                self.halt_processing()  # Halt processing for IP block
+                return alert
         
         # Check for general error threshold
         if len(recent_errors) >= self.max_errors_threshold:
@@ -208,6 +238,14 @@ class YouTubeBlockingDetector:
                 )
         
         return None
+    
+    def _contains_ip_block_pattern(self, error_message: str) -> bool:
+        """Check if error message contains IP blocking patterns."""
+        if not error_message:
+            return False
+        
+        error_lower = error_message.lower()
+        return any(pattern.lower() in error_lower for pattern in self.ip_block_patterns)
     
     def _create_alert(self, block_type: BlockType, severity: str, 
                      message: str, recommendation: str, 
@@ -294,3 +332,87 @@ class YouTubeBlockingDetector:
         if self.current_alert:
             logger.info(f"Manually clearing alert: {self.current_alert.block_type.value}")
             self.current_alert = None
+            self.processing_halted = False
+    
+    def should_halt_processing(self) -> bool:
+        """Check if processing should be immediately halted due to blocking."""
+        if not self.current_alert:
+            return False
+        
+        # Always halt for critical IP blocks and rate limiting
+        if self.current_alert.block_type in [BlockType.IP_BLOCK, BlockType.CLOUD_IP_BLOCK]:
+            return True
+        
+        if self.current_alert.block_type == BlockType.RATE_LIMIT and self.current_alert.severity == "critical":
+            return True
+        
+        # Halt for any critical severity blocking
+        return self.current_alert.severity == "critical"
+    
+    def get_halt_reason(self) -> str:
+        """Get the reason why processing should be halted."""
+        if not self.current_alert:
+            return ""
+        
+        if self.current_alert.block_type == BlockType.IP_BLOCK:
+            return "YouTube has blocked your IP address. Processing halted to prevent further blocking."
+        elif self.current_alert.block_type == BlockType.CLOUD_IP_BLOCK:
+            return "YouTube is blocking cloud provider IPs. Processing halted."
+        elif self.current_alert.block_type == BlockType.RATE_LIMIT:
+            return "YouTube rate limiting detected. Processing halted to respect limits."
+        else:
+            return f"YouTube blocking detected ({self.current_alert.block_type.value}). Processing halted."
+    
+    def is_blocking_cleared(self) -> bool:
+        """Check if blocking has been cleared and processing can resume."""
+        # If no current alert, blocking is cleared
+        if not self.current_alert:
+            return True
+        
+        # Check if alert severity has been reduced
+        if self.current_alert.severity != "critical":
+            return True
+        
+        # For IP blocks, require manual clearance
+        if self.current_alert.block_type in [BlockType.IP_BLOCK, BlockType.CLOUD_IP_BLOCK]:
+            return False
+        
+        # For rate limits, check if enough time has passed
+        if self.current_alert.block_type == BlockType.RATE_LIMIT:
+            time_since_last_error = datetime.now() - self.current_alert.last_error
+            return time_since_last_error > timedelta(minutes=10)
+        
+        return False
+    
+    def get_user_action_options(self) -> List[str]:
+        """Get available user action options based on current blocking type."""
+        if not self.current_alert:
+            return ["resume"]
+        
+        options = []
+        
+        if self.current_alert.block_type == BlockType.IP_BLOCK:
+            options.extend(["change_ip", "wait_24h", "stop_processing"])
+        elif self.current_alert.block_type == BlockType.CLOUD_IP_BLOCK:
+            options.extend(["change_to_residential_ip", "stop_processing"])
+        elif self.current_alert.block_type == BlockType.RATE_LIMIT:
+            options.extend(["wait_and_retry", "stop_processing"])
+        else:
+            options.extend(["wait_and_retry", "stop_processing"])
+        
+        return options
+    
+    def halt_processing(self):
+        """Mark processing as halted due to blocking."""
+        self.processing_halted = True
+        logger.critical("Processing halted due to YouTube blocking")
+    
+    def resume_processing(self):
+        """Resume processing after blocking is resolved."""
+        if self.is_blocking_cleared():
+            self.processing_halted = False
+            logger.info("Processing resumed - blocking cleared")
+            return True
+        else:
+            logger.warning("Cannot resume processing - blocking still active")
+            return False

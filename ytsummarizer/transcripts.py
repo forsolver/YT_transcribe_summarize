@@ -76,7 +76,7 @@ def get_retry_manager() -> RetryManager:
             exponential_base=2.0,
             jitter=True
         )
-        _retry_manager = RetryManager(get_error_handler(), config)
+        _retry_manager = RetryManager(get_error_handler(), config, get_blocking_detector())
     return _retry_manager
 
 def youtube_api_call(func: Callable, operation_name: str, video_id: Optional[str] = None, **kwargs):

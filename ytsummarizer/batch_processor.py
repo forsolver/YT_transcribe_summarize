@@ -24,6 +24,7 @@ from .video_processor import extract_trick_segments, extract_video_segments
 from .url_detector import URLDetector, URLType
 from .state_manager import StateManager
 from .settings_manager import SettingsManager
+from .processing_controller import ProcessingController, BlockingStatus
 
 
 @dataclass
@@ -74,6 +75,7 @@ class BatchResult:
     start_time: datetime = field(default_factory=datetime.now)
     end_time: Optional[datetime] = None
     cancelled: bool = False
+    halt_reason: Optional[Any] = None  # ProcessingHaltReason when halted due to blocking
 
 
 class BatchProcessor:
@@ -88,16 +90,19 @@ class BatchProcessor:
     """
     
     def __init__(self, progress_callback: Optional[Callable] = None, 
-                 cancel_token: Optional[Event] = None):
+                 cancel_token: Optional[Event] = None,
+                 processing_controller: Optional[ProcessingController] = None):
         """
         Initialize the batch processor.
         
         Args:
             progress_callback: Function to call for progress updates
             cancel_token: Event object to check for cancellation requests
+            processing_controller: Controller for handling YouTube blocking
         """
         self.progress_callback = progress_callback
         self.cancel_token = cancel_token
+        self.processing_controller = processing_controller
         self.url_detector = URLDetector()
         self.logger = logging.getLogger(__name__)
     
@@ -326,6 +331,27 @@ class BatchProcessor:
                 # Save progress for resuming later
                 if source_url:
                     self._save_progress(source_url, source_info, videos, processed_video_ids, i, len(videos))
+                
+                break
+            
+            # Check for YouTube blocking
+            if self.processing_controller and self.processing_controller.should_halt_processing():
+                logger.critical(f"YouTube blocking detected - halting batch processing at video {i+1}")
+                
+                # Save progress before halting
+                current_progress = {
+                    "source_info": source_info.__dict__,
+                    "videos": [v.__dict__ for v in videos],
+                    "processed_video_ids": list(processed_video_ids),
+                    "last_processed_index": i - 1,
+                    "total_videos": len(videos),
+                    "processed_count": len(processed_video_ids)
+                }
+                
+                halt_reason = self.processing_controller.halt_processing(source_url, current_progress)
+                result.cancelled = True
+                result.halt_reason = halt_reason
+                self._report_progress(i, len(videos), f"Processing halted: {halt_reason.message}")
                 
                 break
             
