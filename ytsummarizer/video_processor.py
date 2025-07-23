@@ -8,8 +8,11 @@ from yt_dlp import YoutubeDL
 logger = logging.getLogger("ytsummarizer.video_processor")
 
 DEFAULT_MIN_SILENCE_DURATION = 2.0  # Минимальная длительность "тихого" сегмента в секундах, чтобы считать его трюком
-DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT = 3 # Максимальное количество слов в сегменте, чтобы он считался "тихим"
-MUSIC_TAG_PATTERN = re.compile(r"\[музыка\]", re.IGNORECASE)
+DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT = 5 # Увеличиваем максимальное количество слов в сегменте
+# Шаблоны для обнаружения музыки и звуков в разных языках
+MUSIC_TAG_PATTERN = re.compile(r"\[(музыка|music|sound|звук|noise|шум)\]", re.IGNORECASE)
+# Шаблоны для игнорирования в тексте (слова, которые могут быть в трюковых сегментах)
+TRICK_WORDS = re.compile(r"\b(wow|whoa|oh|ah|yeah|yes|да|вау|ого|ух|эй|круто|cool|nice|trick|трюк)\b", re.IGNORECASE)
 
 def extract_trick_segments(
     fragments: list[dict],
@@ -43,8 +46,12 @@ def extract_trick_segments(
     current_trick_start_time = None
     current_trick_accumulated_duration = 0.0
     last_fragment_end_time = 0.0
+    
+    logger = logging.getLogger("ytsummarizer.video_processor")
+    logger.debug(f"Starting trick extraction with {len(fragments)} fragments, min_silence={min_silence_duration}s, max_words={max_words_in_segment}")
 
     if not fragments:
+        logger.debug("No fragments provided, returning empty list")
         return []
 
     for i, fragment in enumerate(fragments):
@@ -68,9 +75,20 @@ def extract_trick_segments(
 
 
         words = text.split()
-        is_silent_text = (
-            len(words) <= max_words_in_segment and not (len(words) > 0 and MUSIC_TAG_PATTERN.fullmatch(words[0]) is None and len(words[0]) > 1)
-        ) or MUSIC_TAG_PATTERN.search(text) is not None
+        
+        # Проверяем, содержит ли текст только музыку/звуки или короткие восклицания
+        has_music_tag = MUSIC_TAG_PATTERN.search(text) is not None
+        
+        # Проверяем, содержит ли текст только короткие восклицания или допустимые слова для трюков
+        only_trick_words = False
+        if len(words) <= max_words_in_segment:
+            # Если все слова в тексте - это восклицания или допустимые слова для трюков
+            only_trick_words = all(
+                len(word) <= 4 or TRICK_WORDS.search(word) is not None
+                for word in words
+            )
+        
+        is_silent_text = has_music_tag or only_trick_words or len(words) <= max_words_in_segment / 2
 
 
         if is_silent_text:
@@ -80,20 +98,29 @@ def extract_trick_segments(
                 # Если это первый фрагмент или предыдущий тоже был "тихим" (что покрывается логикой объединения),
                 # используем start_time текущего фрагмента.
                 current_trick_start_time = start_time
+                logger.debug(f"Starting potential trick at {start_time:.1f}s: '{text}'")
 
             current_trick_accumulated_duration += duration
+            logger.debug(f"Silent fragment at {start_time:.1f}s: '{text}' (accumulated: {current_trick_accumulated_duration:.1f}s)")
         else:
             # Сегмент с текстом, проверяем, был ли накоплен трюк
-            if current_trick_start_time is not None and current_trick_accumulated_duration >= min_silence_duration:
-                trick_end_time = start_time # Трюк заканчивается там, где начался текстовый сегмент
-                trick_segments.append({
-                    "start": current_trick_start_time,
-                    "end": trick_end_time,
-                    "duration": trick_end_time - current_trick_start_time
-                })
-            # Сбрасываем текущий трюк
-            current_trick_start_time = None
-            current_trick_accumulated_duration = 0.0
+            if current_trick_start_time is not None:
+                if current_trick_accumulated_duration >= min_silence_duration:
+                    trick_end_time = start_time # Трюк заканчивается там, где начался текстовый сегмент
+                    trick_segments.append({
+                        "start": current_trick_start_time,
+                        "end": trick_end_time,
+                        "duration": trick_end_time - current_trick_start_time
+                    })
+                    logger.debug(f"Added trick segment: {current_trick_start_time:.1f}s - {trick_end_time:.1f}s ({trick_end_time - current_trick_start_time:.1f}s)")
+                else:
+                    logger.debug(f"Discarding potential trick at {current_trick_start_time:.1f}s - too short: {current_trick_accumulated_duration:.1f}s < {min_silence_duration:.1f}s")
+                
+                # Сбрасываем текущий трюк
+                current_trick_start_time = None
+                current_trick_accumulated_duration = 0.0
+            
+            logger.debug(f"Non-silent fragment at {start_time:.1f}s: '{text}'")
 
         last_fragment_end_time = actual_end_time
 
@@ -110,7 +137,15 @@ def extract_trick_segments(
             "end": final_trick_end_time,
             "duration": final_trick_end_time - current_trick_start_time
         })
+        logger.debug(f"Added final trick segment: {current_trick_start_time:.1f}s - {final_trick_end_time:.1f}s ({final_trick_end_time - current_trick_start_time:.1f}s)")
 
+    logger.debug(f"Trick extraction complete, found {len(trick_segments)} segments")
+    
+    # Логируем найденные сегменты для отладки
+    if trick_segments:
+        for i, segment in enumerate(trick_segments):
+            logger.debug(f"  Trick {i+1}: {segment['start']:.1f}s - {segment['end']:.1f}s ({segment['duration']:.1f}s)")
+    
     return trick_segments
 
 def extract_video_segments(video_id: str, segments: list[dict], output_dir: str = "tricks", video_info: dict = None) -> list[str]:
