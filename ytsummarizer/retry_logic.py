@@ -12,6 +12,7 @@ from enum import Enum
 
 from .error_handler import ErrorHandler, ErrorCategory, ActionType
 from .youtube_blocking_detector import YouTubeBlockingDetector
+from .logging_config import log_performance_metric
 
 logger = logging.getLogger("ytsummarizer.retry_logic")
 
@@ -200,6 +201,17 @@ class RetryManager:
                     del self.active_retries[operation_id]
                 
                 logger.debug(f"Operation {operation_id} succeeded on attempt {attempt}")
+                
+                # Log performance metric for successful operation
+                if attempt > 1:
+                    log_performance_metric(
+                        metric_name="retry_success",
+                        value=attempt,
+                        unit="attempts",
+                        operation_id=operation_id,
+                        operation_type=context.get('operation_type', 'unknown')
+                    )
+                
                 return result
                 
             except Exception as e:

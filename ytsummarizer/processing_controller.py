@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from .youtube_blocking_detector import YouTubeBlockingDetector, BlockingAlert, BlockType
 from .state_manager import StateManager
+from .logging_config import log_blocking_event, log_performance_metric
 
 logger = logging.getLogger("ytsummarizer.processing_controller")
 
@@ -133,6 +134,16 @@ class ProcessingController:
                 logger.error(f"Error in halt callback: {e}")
         
         logger.critical(f"Processing halted: {halt_reason.message}")
+        
+        # Log to specialized blocking events log
+        log_blocking_event(
+            event_type="PROCESSING_CONTROLLER_HALT",
+            message=halt_reason.message,
+            reason_type=halt_reason.reason_type.value,
+            recommended_action=halt_reason.recommended_action,
+            can_resume=halt_reason.can_resume,
+            source_url=source_url
+        )
         return halt_reason
     
     def can_resume_processing(self) -> bool:

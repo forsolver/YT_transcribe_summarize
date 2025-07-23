@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
+from .logging_config import log_blocking_event
+
 # Configure logging
 logger = logging.getLogger("ytsummarizer.youtube_blocking_detector")
 
@@ -265,6 +267,17 @@ class YouTubeBlockingDetector:
         self.current_alert = alert
         logger.warning(f"Blocking alert created: {alert.block_type.value} - {alert.message}")
         
+        # Log to specialized blocking events log
+        log_blocking_event(
+            event_type=alert.block_type.value,
+            message=alert.message,
+            severity=alert.severity,
+            error_count=alert.error_count,
+            first_error=alert.first_error.isoformat(),
+            last_error=alert.last_error.isoformat(),
+            recommendation=alert.recommendation
+        )
+        
         return alert
     
     def get_current_status(self) -> dict:
@@ -406,6 +419,15 @@ class YouTubeBlockingDetector:
         """Mark processing as halted due to blocking."""
         self.processing_halted = True
         logger.critical("Processing halted due to YouTube blocking")
+        
+        # Log halt event to specialized blocking log
+        if self.current_alert:
+            log_blocking_event(
+                event_type="PROCESSING_HALTED",
+                message=f"Processing halted due to {self.current_alert.block_type.value}",
+                block_type=self.current_alert.block_type.value,
+                severity=self.current_alert.severity
+            )
     
     def resume_processing(self):
         """Resume processing after blocking is resolved."""
