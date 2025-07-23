@@ -496,7 +496,7 @@ class BatchProcessor:
                 trick_settings = settings.get("trick_detection", {})
                 
                 # Используем настройки из settings.json или значения по умолчанию
-                min_silence_duration = trick_settings.get("min_silence_duration", 5.0)
+                min_silence_duration = trick_settings.get("min_silence_duration", 10.0)
                 max_words_in_segment = trick_settings.get("max_words_in_segment", 5)
                 
                 logger.debug(f"Using trick detection settings: min_silence={min_silence_duration}s, max_words={max_words_in_segment}")

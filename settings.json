@@ -2,7 +2,7 @@
   "output_folder": "G:/My Drive/Exchange/BMX tricks videos/https   www.youtube.com @Theskatenomad playlists",
   "language_priority": ["en", "ru"],
   "trick_detection": {
-    "min_silence_duration": 5.0,
+    "min_silence_duration": 10.0,
     "max_words_in_segment": 5
   }
 }

@@ -7,7 +7,7 @@ from yt_dlp import YoutubeDL
 # Настройка логирования
 logger = logging.getLogger("ytsummarizer.video_processor")
 
-DEFAULT_MIN_SILENCE_DURATION = 2.0  # Минимальная длительность "тихого" сегмента в секундах, чтобы считать его трюком
+DEFAULT_MIN_SILENCE_DURATION = 10.0  # Минимальная длительность "тихого" сегмента в секундах, чтобы считать его трюком
 DEFAULT_MAX_WORDS_IN_TRICK_SEGMENT = 5 # Увеличиваем максимальное количество слов в сегменте
 # Шаблоны для обнаружения музыки и звуков в разных языках
 MUSIC_TAG_PATTERN = re.compile(r"\[(музыка|music|sound|звук|noise|шум)\]", re.IGNORECASE)
