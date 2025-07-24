@@ -120,6 +120,29 @@ class YouTubeSummarizerUI(QMainWindow):
         """Возвращает выбранную папку для сохранения файлов"""
         return self.folder_selection_widget.get_selected_folder()
     
+    def _get_batch_options(self) -> BatchOptions:
+        """Get batch processing options from saved settings."""
+        from .settings_manager import SettingsManager
+        try:
+            settings = SettingsManager.load_settings()
+            batch_settings = settings.get("batch_processing", {})
+            
+            return BatchOptions(
+                max_videos=batch_settings.get("max_videos", 50),
+                skip_existing=batch_settings.get("skip_existing", False),
+                output_dir=self.get_output_folder(),
+                auto_resume=batch_settings.get("auto_resume", True)
+            )
+        except Exception as e:
+            logger.error(f"Error loading batch options: {e}")
+            # Return defaults if loading fails
+            return BatchOptions(
+                max_videos=50,
+                skip_existing=False,
+                output_dir=self.get_output_folder(),
+                auto_resume=True
+            )
+    
     def on_folder_changed(self, new_folder: str):
         """Обработчик изменения папки сохранения"""
         logger.info(f"Папка сохранения изменена на: {new_folder}")
@@ -536,8 +559,12 @@ class YouTubeSummarizerUI(QMainWindow):
         """Show batch processing settings dialog."""
         dialog = BatchSettingsDialog(self)
         if dialog.exec_() == QDialog.Accepted:
-            # Settings are stored in the dialog and will be used when processing
-            pass
+            # Settings have been saved to the settings file by the dialog
+            logger.info("Batch settings updated successfully")
+            QMessageBox.information(self, "Настройки сохранены", 
+                                   "Настройки пакетной обработки успешно сохранены.")
+        else:
+            logger.info("Batch settings dialog cancelled")
     
     def cancel_processing(self):
         """Cancel current batch processing operation."""
@@ -588,8 +615,8 @@ class YouTubeSummarizerUI(QMainWindow):
         # Reset cancel token
         self.cancel_token.clear()
         
-        # Get batch options (for now use defaults, later from settings dialog)
-        options = BatchOptions(max_videos=50, output_dir=self.get_output_folder())
+        # Get batch options from saved settings
+        options = self._get_batch_options()
         logger.info(f"Batch options: max_videos={options.max_videos}")
         
         # Check for saved state
@@ -1147,7 +1174,6 @@ class BatchSettingsDialog(QDialog):
         # Max videos
         self.max_videos_spin = QSpinBox()
         self.max_videos_spin.setRange(1, 1000)
-        self.max_videos_spin.setValue(50)
         settings_layout.addRow("Максимум видео:", self.max_videos_spin)
         
         # Skip existing
@@ -1156,8 +1182,10 @@ class BatchSettingsDialog(QDialog):
         
         # Auto resume
         self.auto_resume_check = QCheckBox("Автоматически возобновлять обработку")
-        self.auto_resume_check.setChecked(True)
         settings_layout.addRow(self.auto_resume_check)
+        
+        # Load current settings
+        self._load_settings()
         
         layout.addWidget(settings_group)
         
@@ -1183,7 +1211,7 @@ class BatchSettingsDialog(QDialog):
         
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._save_and_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
     
@@ -1196,6 +1224,50 @@ class BatchSettingsDialog(QDialog):
             output_dir=output_dir,
             auto_resume=self.auto_resume_check.isChecked()
         )
+    
+    def _load_settings(self):
+        """Load batch settings from settings file."""
+        from .settings_manager import SettingsManager
+        try:
+            settings = SettingsManager.load_settings()
+            batch_settings = settings.get("batch_processing", {})
+            
+            # Load values with defaults
+            self.max_videos_spin.setValue(batch_settings.get("max_videos", 50))
+            self.skip_existing_check.setChecked(batch_settings.get("skip_existing", False))
+            self.auto_resume_check.setChecked(batch_settings.get("auto_resume", True))
+            
+        except Exception as e:
+            logger.error(f"Error loading batch settings: {e}")
+            # Use defaults if loading fails
+            self.max_videos_spin.setValue(50)
+            self.skip_existing_check.setChecked(False)
+            self.auto_resume_check.setChecked(True)
+    
+    def _save_and_accept(self):
+        """Save settings and accept dialog."""
+        from .settings_manager import SettingsManager
+        try:
+            # Load current settings
+            settings = SettingsManager.load_settings()
+            
+            # Update batch processing settings
+            batch_settings = {
+                "max_videos": self.max_videos_spin.value(),
+                "skip_existing": self.skip_existing_check.isChecked(),
+                "auto_resume": self.auto_resume_check.isChecked()
+            }
+            settings["batch_processing"] = batch_settings
+            
+            # Save settings
+            SettingsManager.save_settings(settings)
+            logger.info(f"Batch settings saved: {batch_settings}")
+            
+        except Exception as e:
+            logger.error(f"Error saving batch settings: {e}")
+        
+        # Accept the dialog
+        self.accept()
     
     def _load_saved_states(self):
         """Load and display saved states"""
